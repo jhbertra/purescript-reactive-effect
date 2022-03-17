@@ -1,0 +1,12 @@
+output/
+bower_components/
+generated-docs/
+.psci*
+.spago
+.spago2nix
+.psa-stash
+.pre-commit*
+.psc-ide-port
+.direnv
+.envrc
+*.log
