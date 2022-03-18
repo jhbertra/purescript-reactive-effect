@@ -2,11 +2,13 @@ module Control.Reactive.Network where
 
 import Prelude
 
+import Control.Monad.Fix (class MonadFix)
 import Control.Reactive.Behaviour (class Behaviour)
 import Control.Reactive.Event (class Event)
+import Data.Lazy (Lazy)
 
 class
-  ( Monad m
+  ( MonadFix m
   , Event event
   , Behaviour event behaviour
   ) <=
@@ -15,6 +17,7 @@ class
   accumE :: forall a. a -> event (a -> a) -> m (event a)
   hold :: forall a. a -> event a -> m (behaviour a)
   sample :: forall a. behaviour a -> m a
+  sampleLazy :: forall a. behaviour a -> m (Lazy a)
   observe :: forall a. event (m a) -> event a
   switchE :: forall a. event (event a) -> m (event a)
   switchB :: forall a. behaviour a -> event (behaviour a) -> m (behaviour a)
