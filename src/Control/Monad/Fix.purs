@@ -2,30 +2,32 @@ module Control.Monad.Fix where
 
 import Prelude
 
+import Control.Lazy (class Lazy, defer)
 import Control.Monad.RWS.Trans (RWSResult(..), RWST(..), runRWST)
 import Control.Monad.Reader.Trans (ReaderT(..), runReaderT)
 import Control.Monad.State.Trans (StateT(..), runStateT)
 import Control.Monad.Writer.Trans (WriterT(..), runWriterT)
 import Data.Either (Either(..))
 import Data.Identity (Identity(..))
-import Data.Lazy (Lazy, defer, force)
+import Data.Lazy as DL
 import Data.Maybe (Maybe(..))
-import Data.Newtype (unwrap)
+import Data.Newtype (class Newtype, unwrap)
 import Data.Profunctor (lcmap)
-import Data.Tuple (fst)
+import Data.Tuple (Tuple(..), fst, snd)
 import Effect (Effect)
 import Effect.Aff (Aff, error, fiberCanceler, launchAff, makeAff)
 import Effect.Class (liftEffect)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Effect.Ref as Ref
 import Effect.Unsafe (unsafePerformEffect)
+import Unsafe.Coerce (unsafeCoerce)
 
 foreign import fixEffect
   :: forall a. ((Unit -> a) -> Effect a) -> Effect a
 
 foreign import fixPure_ :: forall a. ((Unit -> a) -> a) -> a
 
-fixPure :: forall a. (Lazy a -> a) -> a
+fixPure :: forall a. Lazy a => (a -> a) -> a
 fixPure = fixPure_ <<< lcmap defer
 
 -- | Type class for monads that support fixpoints.
@@ -34,13 +36,20 @@ fixPure = fixPure_ <<< lcmap defer
 -- | not to apply the supplied function until the computation returned; else
 -- | a dynamic error will be thrown.
 class (Monad m) <= MonadFix m where
-  mfix :: forall a. (Lazy a -> m a) -> m a
+  mfix :: forall a. Lazy a => (a -> m a) -> m a
 
-instance monadFixRWST :: (Monoid w, MonadFix m) => MonadFix (RWST r w s m) where
-  mfix f = RWST \r s -> mfix \la -> runRWST
-    (f $ defer \_ -> case force la of RWSResult _ a _ -> a)
-    r
-    s
+instance monadFixRWST ::
+  ( Lazy s
+  , Lazy w
+  , Monoid w
+  , MonadFix m
+  ) =>
+  MonadFix (RWST r w s m) where
+  mfix f = RWST \r s ->
+    map unwrap
+      $ mfix
+      $ overM LazyRWSResult
+      $ case _ of RWSResult _ a _ -> runRWST (f a) r s
 
 instance MonadFix Identity where
   mfix = Identity <<< fixPure <<< map unwrap
@@ -74,8 +83,48 @@ instance MonadFix (Function r) where
 instance (MonadFix m) => MonadFix (ReaderT r m) where
   mfix f = ReaderT \r -> mfix (flip runReaderT r <<< f)
 
-instance (MonadFix m) => MonadFix (StateT s m) where
-  mfix f = StateT \s -> mfix $ flip runStateT s <<< f <<< map fst
+instance (Lazy s, MonadFix m) => MonadFix (StateT s m) where
+  mfix f = StateT \s ->
+    map unwrap
+      $ mfix
+      $ overM LazyTuple
+      $ flip runStateT s <<< f <<< fst
 
-instance (MonadFix m, Monoid w) => MonadFix (WriterT w m) where
-  mfix f = WriterT $ mfix $ runWriterT <<< f <<< map fst
+instance (Lazy w, MonadFix m, Monoid w) => MonadFix (WriterT w m) where
+  mfix f = WriterT
+    $ map unwrap
+    $ mfix
+    $ overM LazyTuple
+    $ runWriterT <<< f <<< fst
+
+newtype LazyTuple a b = LazyTuple (Tuple a b)
+
+derive instance Newtype (LazyTuple a b) _
+derive instance Functor (LazyTuple a)
+instance (Lazy a, Lazy b) => Lazy (LazyTuple a b) where
+  defer f = LazyTuple $ Tuple
+    (defer $ fst <<< unwrap <<< f)
+    (defer $ snd <<< unwrap <<< f)
+
+newtype LazyRWSResult s a w = LazyRWSResult (RWSResult s a w)
+
+derive instance Newtype (LazyRWSResult s a w) _
+instance (Lazy s, Lazy a, Lazy w) => Lazy (LazyRWSResult s a w) where
+  defer f = LazyRWSResult $ RWSResult
+    (defer $ (case _ of RWSResult s _ _ -> s) <<< unwrap <<< f)
+    (defer $ (case _ of RWSResult _ a _ -> a) <<< unwrap <<< f)
+    (defer $ (case _ of RWSResult _ _ w -> w) <<< unwrap <<< f)
+
+liftLazy :: forall a. Lazy a => DL.Lazy a -> a
+liftLazy la = defer \_ -> DL.force la
+
+overM
+  :: forall m s t a b
+   . Newtype s a
+  => Newtype t b
+  => Functor m
+  => (a -> s)
+  -> (a -> m b)
+  -> s
+  -> m t
+overM _ = (unsafeCoerce :: (a -> m b) -> s -> m t)
