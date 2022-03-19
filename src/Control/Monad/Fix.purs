@@ -2,7 +2,7 @@ module Control.Monad.Fix where
 
 import Prelude
 
-import Control.Lazy (class Lazy, defer)
+import Control.Lazy (class Lazy, defer, fix)
 import Control.Monad.RWS.Trans (RWSResult(..), RWST(..), runRWST)
 import Control.Monad.Reader.Trans (ReaderT(..), runReaderT)
 import Control.Monad.State.Trans (StateT(..), runStateT)
@@ -12,23 +12,21 @@ import Data.Identity (Identity(..))
 import Data.Lazy as DL
 import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype, unwrap)
-import Data.Profunctor (lcmap)
+import Data.Symbol (class IsSymbol)
 import Data.Tuple (Tuple(..), fst, snd)
-import Effect (Effect)
 import Effect.Aff (Aff, error, fiberCanceler, launchAff, makeAff)
 import Effect.Class (liftEffect)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Effect.Ref as Ref
 import Effect.Unsafe (unsafePerformEffect)
+import Prim.Row as R
+import Prim.RowList (class RowToList, RowList)
+import Prim.RowList as RL
+import Record as Record
+import Record.Builder (Builder)
+import Record.Builder as Builder
+import Type.Proxy (Proxy(..))
 import Unsafe.Coerce (unsafeCoerce)
-
-foreign import fixEffect
-  :: forall a. ((Unit -> a) -> Effect a) -> Effect a
-
-foreign import fixPure_ :: forall a. ((Unit -> a) -> a) -> a
-
-fixPure :: forall a. Lazy a => (a -> a) -> a
-fixPure = fixPure_ <<< lcmap defer
 
 -- | Type class for monads that support fixpoints.
 -- |
@@ -52,7 +50,7 @@ instance monadFixRWST ::
       $ case _ of RWSResult _ a _ -> runRWST (f a) r s
 
 instance MonadFix Identity where
-  mfix = Identity <<< fixPure <<< map unwrap
+  mfix = Identity <<< fix <<< map unwrap
 
 message :: String
 message =
@@ -74,28 +72,17 @@ instance MonadFix Aff where
         resolve $ Right result
     pure $ fiberCanceler fiber
 
-instance MonadFix Effect where
-  mfix = fixEffect <<< lcmap defer
-
 instance MonadFix (Function r) where
-  mfix f r = fixPure (flip f r)
+  mfix f r = fix (flip f r)
 
 instance (MonadFix m) => MonadFix (ReaderT r m) where
   mfix f = ReaderT \r -> mfix (flip runReaderT r <<< f)
 
 instance (Lazy s, MonadFix m) => MonadFix (StateT s m) where
-  mfix f = StateT \s ->
-    map unwrap
-      $ mfix
-      $ overM LazyTuple
-      $ flip runStateT s <<< f <<< fst
+  mfix f = StateT \s -> mfixTuple $ flip runStateT s <<< f <<< fst
 
 instance (Lazy w, MonadFix m, Monoid w) => MonadFix (WriterT w m) where
-  mfix f = WriterT
-    $ map unwrap
-    $ mfix
-    $ overM LazyTuple
-    $ runWriterT <<< f <<< fst
+  mfix f = WriterT $ mfixTuple $ runWriterT <<< f <<< fst
 
 newtype LazyTuple a b = LazyTuple (Tuple a b)
 
@@ -128,3 +115,52 @@ overM
   -> s
   -> m t
 overM _ = (unsafeCoerce :: (a -> m b) -> s -> m t)
+
+mfixTuple
+  :: forall m a b
+   . Lazy a
+  => Lazy b
+  => MonadFix m
+  => (Tuple a b -> m (Tuple a b))
+  -> m (Tuple a b)
+mfixTuple = map unwrap <<< mfix <<< overM LazyTuple
+
+mfixRecord
+  :: forall m rl r
+   . RowToList r rl
+  => DeferRecord rl r r
+  => MonadFix m
+  => ({ | r } -> m { | r })
+  -> m { | r }
+mfixRecord = map unwrap <<< mfix <<< overM LazyRecord
+
+newtype LazyRecord r = LazyRecord { | r }
+
+derive instance Newtype (LazyRecord r) _
+instance (RowToList r rl, DeferRecord rl r r) => Lazy (LazyRecord r) where
+  defer = LazyRecord <<< Builder.buildFromScratch
+    <<< deferRecord (Proxy :: _ rl)
+    <<< map unwrap
+
+class
+  DeferRecord (rl :: RowList Type) (ri :: Row Type) (ro :: Row Type)
+  | rl -> ri ro where
+  deferRecord :: Proxy rl -> (Unit -> { | ri }) -> Builder {} { | ro }
+
+instance DeferRecord RL.Nil ri () where
+  deferRecord _ _ = identity
+
+instance
+  ( IsSymbol label
+  , R.Cons label a ro' ro
+  , R.Cons label a ri' ri
+  , R.Lacks label ro'
+  , Lazy a
+  , DeferRecord rl ri ro'
+  ) =>
+  DeferRecord (RL.Cons label a rl) ri ro where
+  deferRecord _ f = Builder.insert label a <<< deferRecord rl f
+    where
+    label = Proxy :: _ label
+    rl = Proxy :: _ rl
+    a = defer $ Record.get label <<< f

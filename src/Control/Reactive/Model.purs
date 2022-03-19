@@ -4,7 +4,7 @@ import Prelude hiding ((<@>))
 
 import Control.Bind (bindFlipped)
 import Control.Lazy (class Lazy, defer)
-import Control.Monad.Fix (class MonadFix, LazyTuple(..), mfix, overM)
+import Control.Monad.Fix (class MonadFix, mfixRecord)
 import Control.Monad.Reader (class MonadAsk, Reader, ask, runReader)
 import Control.Reactive.Behaviour (class Behaviour, (<@>))
 import Control.Reactive.Class (class Reactive, hold, sampleLazy)
@@ -38,7 +38,6 @@ import Data.List.Lazy
 import Data.Maybe (Maybe(..), fromJust, fromMaybe)
 import Data.Newtype (class Newtype, over, un, unwrap)
 import Data.These (These(..))
-import Data.Tuple (Tuple(..))
 import Partial.Unsafe (unsafePartial)
 
 newtype ReactM a = ReactM (Reader Int a)
@@ -98,10 +97,10 @@ instance Behaviour EventF BehaviourF where
 
 instance Reactive EventF BehaviourF ReactM where
   accumE a e1 = do
-    LazyTuple (Tuple e2 _) <- mfix $ overM LazyTuple \(Tuple e2 b) -> do
-      let e2' = ((#) <$> b) <@> e1
-      b' <- hold a e2
-      pure $ Tuple e2' b'
+    { e2 } <- mfixRecord \out -> do
+      let e2 = ((#) <$> out.b) <@> e1
+      b <- hold a e2
+      pure { e2, b }
     pure e2
 
   hold a e = do
