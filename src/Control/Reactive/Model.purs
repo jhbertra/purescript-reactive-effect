@@ -7,8 +7,8 @@ import Control.Lazy (class Lazy, defer)
 import Control.Monad.Fix (class MonadFix, LazyTuple(..), mfix, overM)
 import Control.Monad.Reader (class MonadAsk, Reader, ask, runReader)
 import Control.Reactive.Behaviour (class Behaviour, (<@>))
+import Control.Reactive.Class (class Reactive, hold, sampleLazy)
 import Control.Reactive.Event (class Event)
-import Control.Reactive.Network (class Network, hold, sampleLazy)
 import Data.Align (class Align, class Alignable)
 import Data.Align as A
 import Data.Array as Array
@@ -41,18 +41,18 @@ import Data.These (These(..))
 import Data.Tuple (Tuple(..))
 import Partial.Unsafe (unsafePartial)
 
-newtype NetworkM a = NetworkM (Reader Int a)
+newtype ReactM a = ReactM (Reader Int a)
 newtype EventF a = EventF (List (Maybe a))
 newtype BehaviourF a = BehaviourF (List a)
 
-derive instance Newtype (NetworkM a) _
-derive instance Functor NetworkM
-derive newtype instance Apply NetworkM
-derive newtype instance Applicative NetworkM
-derive newtype instance Bind NetworkM
-derive newtype instance Monad NetworkM
-derive newtype instance MonadAsk Int NetworkM
-derive newtype instance MonadFix NetworkM
+derive instance Newtype (ReactM a) _
+derive instance Functor ReactM
+derive newtype instance Apply ReactM
+derive newtype instance Applicative ReactM
+derive newtype instance Bind ReactM
+derive newtype instance Monad ReactM
+derive newtype instance MonadAsk Int ReactM
+derive newtype instance MonadFix ReactM
 
 derive instance Newtype (EventF a) _
 derive instance Functor EventF
@@ -96,7 +96,7 @@ derive newtype instance Lazy (BehaviourF a)
 instance Behaviour EventF BehaviourF where
   applyE (BehaviourF fs) (EventF as) = EventF $ zipWith map fs as
 
-instance Network EventF BehaviourF NetworkM where
+instance Reactive EventF BehaviourF ReactM where
   accumE a e1 = do
     LazyTuple (Tuple e2 _) <- mfix $ overM LazyTuple \(Tuple e2 b) -> do
       let e2' = ((#) <$> b) <@> e1

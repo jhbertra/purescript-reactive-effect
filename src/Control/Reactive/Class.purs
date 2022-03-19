@@ -1,4 +1,4 @@
-module Control.Reactive.Network where
+module Control.Reactive.Class where
 
 import Prelude
 
@@ -13,7 +13,7 @@ class
   , Event event
   , Behaviour event behaviour
   ) <=
-  Network event behaviour m
+  Reactive event behaviour m
   | m -> event behaviour where
   accumE :: forall a. a -> event (a -> a) -> m (event a)
   hold :: forall a. a -> event a -> m (behaviour a)
@@ -30,7 +30,7 @@ class
 
 accumB
   :: forall event behaviour m a
-   . Network event behaviour m
+   . Reactive event behaviour m
   => a
   -> event (a -> a)
   -> m (behaviour a)
