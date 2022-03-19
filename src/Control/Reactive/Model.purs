@@ -4,10 +4,11 @@ import Prelude hiding ((<@>))
 
 import Control.Bind (bindFlipped)
 import Control.Lazy (class Lazy, defer)
+import Control.Lazy.Lazy1 (class Lazy1)
 import Control.Monad.Fix (class MonadFix, mfixRecord)
 import Control.Monad.Reader (class MonadAsk, Reader, ask, runReader)
 import Control.Reactive.Behaviour (class Behaviour, (<@>))
-import Control.Reactive.Class (class Reactive, hold, sampleLazy)
+import Control.Reactive.Class (class Reactive, hold)
 import Control.Reactive.Event (class Event)
 import Data.Align (class Align, class Alignable)
 import Data.Align as A
@@ -20,7 +21,6 @@ import Data.Filterable
   , filterMapDefault
   , partitionMapDefault
   )
-import Data.Lazy as DL
 import Data.List.Lazy
   ( List(..)
   , drop
@@ -56,6 +56,8 @@ derive newtype instance MonadFix ReactM
 derive instance Newtype (EventF a) _
 derive instance Functor EventF
 derive newtype instance Lazy (EventF a)
+instance Lazy1 EventF where
+  defer1 = defer
 
 instance Compactable EventF where
   compact = over EventF $ map join
@@ -91,6 +93,7 @@ derive instance Functor BehaviourF
 derive newtype instance Apply BehaviourF
 derive newtype instance Applicative BehaviourF
 derive newtype instance Lazy (BehaviourF a)
+derive newtype instance Lazy1 BehaviourF
 
 instance Behaviour EventF BehaviourF where
   applyE (BehaviourF fs) (EventF as) = EventF $ zipWith map fs as
@@ -108,10 +111,12 @@ instance Reactive EventF BehaviourF ReactM where
     pure
       $ BehaviourF
       $ replicate time a <> (scanlLazy fromMaybe) a (forgetE time e)
-  sample b = DL.force <$> sampleLazy b
+  sample (BehaviourF l) = do
+    time <- ask
+    pure $ unsafePartial $ fromJust $ l !! time
   sampleLazy (BehaviourF l) = do
     time <- ask
-    pure $ DL.defer \_ -> unsafePartial $ fromJust $ l !! time
+    pure $ defer \_ -> unsafePartial $ fromJust $ l !! time
   observe = over EventF $ zipWith
     (\time -> map $ flip runReader time <<< unwrap)
     (iterate (add 1) 0)

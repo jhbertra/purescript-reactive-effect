@@ -2,10 +2,10 @@ module Control.Reactive.Class where
 
 import Prelude
 
+import Control.Lazy (class Lazy)
 import Control.Monad.Fix (class MonadFix)
 import Control.Reactive.Behaviour (class Behaviour)
 import Control.Reactive.Event (class Event)
-import Data.Lazy (Lazy)
 import Data.Maybe (Maybe)
 
 class
@@ -18,7 +18,7 @@ class
   accumE :: forall a. a -> event (a -> a) -> m (event a)
   hold :: forall a. a -> event a -> m (behaviour a)
   sample :: forall a. behaviour a -> m a
-  sampleLazy :: forall a. behaviour a -> m (Lazy a)
+  sampleLazy :: forall a. Lazy a => behaviour a -> m a
   observe :: forall a. event (m a) -> event a
   switchE :: forall a. event (event a) -> m (event a)
   switchB :: forall a. behaviour a -> event (behaviour a) -> m (behaviour a)

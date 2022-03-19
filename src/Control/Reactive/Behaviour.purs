@@ -2,12 +2,13 @@ module Control.Reactive.Behaviour where
 
 import Prelude hiding ((<@>))
 
+import Control.Lazy.Lazy1 (class Lazy1)
 import Control.Reactive.Event (class Event)
 import Data.Compactable (compact, separate)
 import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
 
-class (Event e, Applicative f) <= Behaviour e f where
+class (Event e, Applicative f, Lazy1 f) <= Behaviour e f where
   applyE :: forall a b. f (a -> b) -> e a -> e b
 
 applyFirstE

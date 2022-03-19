@@ -2,12 +2,13 @@ module Control.Reactive.Event where
 
 import Prelude
 
+import Control.Lazy.Lazy1 (class Lazy1)
 import Data.Align (class Align, class Alignable, align, nil)
 import Data.Filterable (class Filterable)
 import Data.Foldable (class Foldable, foldr)
 import Data.These (These(..))
 
-class (Filterable f, Alignable f) <= Event f
+class (Filterable f, Alignable f, Lazy1 f) <= Event f
 
 unionWith :: forall f a. Align f => (a -> a -> a) -> f a -> f a -> f a
 unionWith f = align case _ of
