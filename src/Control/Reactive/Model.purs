@@ -11,6 +11,7 @@ import Control.Reactive.Event (class Event)
 import Control.Reactive.Network (class Network, hold, sampleLazy)
 import Data.Align (class Align, class Alignable)
 import Data.Align as A
+import Data.Array as Array
 import Data.Compactable (class Compactable)
 import Data.Either (either, hush)
 import Data.Filterable
@@ -28,6 +29,7 @@ import Data.List.Lazy
   , replicate
   , scanlLazy
   , tail
+  , take
   , uncons
   , zipWith
   , (!!)
@@ -130,6 +132,11 @@ instance Network EventF BehaviourF NetworkM where
     unsafeUncons :: forall a. List a -> { head :: a, tail :: List a }
     unsafeUncons l = unsafePartial $ fromJust $ uncons l
   switchB b = map diagonalB <$> hold b
+  interpret f as =
+    map (Array.fromFoldable <<< take (Array.length as) <<< unwrap)
+      $ f
+      $ EventF
+      $ Array.toUnfoldable as <> repeat Nothing
 
 forgetE :: forall a. Int -> EventF a -> List (Maybe a)
 forgetE time (EventF as) = drop time as

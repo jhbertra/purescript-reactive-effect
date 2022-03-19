@@ -6,6 +6,7 @@ import Control.Monad.Fix (class MonadFix)
 import Control.Reactive.Behaviour (class Behaviour)
 import Control.Reactive.Event (class Event)
 import Data.Lazy (Lazy)
+import Data.Maybe (Maybe)
 
 class
   ( MonadFix m
@@ -21,6 +22,11 @@ class
   observe :: forall a. event (m a) -> event a
   switchE :: forall a. event (event a) -> m (event a)
   switchB :: forall a. behaviour a -> event (behaviour a) -> m (behaviour a)
+  interpret
+    :: forall a b
+     . (event a -> m (event b))
+    -> Array (Maybe a)
+    -> m (Array (Maybe b))
 
 accumB
   :: forall event behaviour m a
