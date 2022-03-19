@@ -1,6 +1,6 @@
 module Control.Reactive.Behaviour where
 
-import Prelude
+import Prelude hiding ((<@>))
 
 import Control.Reactive.Event (class Event)
 import Data.Compactable (compact, separate)
