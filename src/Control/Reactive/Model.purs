@@ -2,14 +2,17 @@ module Control.Reactive.Model where
 
 import Prelude hiding ((<@>))
 
+import Control.Alternative (class Alternative)
+import Control.Apply (lift2)
 import Control.Bind (bindFlipped)
 import Control.Lazy (class Lazy, defer)
 import Control.Lazy.Lazy1 (class Lazy1)
 import Control.Monad.Fix (class MonadFix, mfixRecord)
 import Control.Monad.Reader (class MonadAsk, Reader, ask, runReader)
-import Control.Reactive.Behaviour (class Behaviour, (<@>))
+import Control.Plus (class Plus)
+import Control.Reactive.Behaviour (class Behaviour, ABehaviour, (<@>))
 import Control.Reactive.Class (class Reactive, hold)
-import Control.Reactive.Event (class Event)
+import Control.Reactive.Event (class Event, AStep, AnEvent)
 import Data.Align (class Align, class Alignable)
 import Data.Align as A
 import Data.Array as Array
@@ -21,6 +24,8 @@ import Data.Filterable
   , filterMapDefault
   , partitionMapDefault
   )
+import Data.Lazy (force)
+import Data.Lazy as DL
 import Data.List.Lazy
   ( List(..)
   , drop
@@ -37,120 +42,68 @@ import Data.List.Lazy
   )
 import Data.Maybe (Maybe(..), fromJust, fromMaybe)
 import Data.Newtype (class Newtype, over, un, unwrap)
+import Data.Ord.Max (Max(..))
 import Data.These (These(..))
+import Effect.Exception.Unsafe (unsafeThrow)
 import Partial.Unsafe (unsafePartial)
 
-newtype ReactM a = ReactM (Reader Int a)
-newtype EventF a = EventF (List (Maybe a))
-newtype BehaviourF a = BehaviourF (List a)
+type Time = Int
+newtype Future a = Future (DL.Lazy (Tuple (Max Time) a))
 
-derive instance Newtype (ReactM a) _
-derive instance Functor ReactM
-derive newtype instance Apply ReactM
-derive newtype instance Applicative ReactM
-derive newtype instance Bind ReactM
-derive newtype instance Monad ReactM
-derive newtype instance MonadAsk Int ReactM
-derive newtype instance MonadFix ReactM
+type Event = AnEvent Future Time
+type Behaviour = ABehaviour Future Time
+type Event = AStep Future Time
 
-derive instance Newtype (EventF a) _
-derive instance Functor EventF
-derive newtype instance Lazy (EventF a)
-instance Lazy1 EventF where
+derive instance Functor Future
+
+instance Lazy (Future a) where
+  defer = Future <<< defer << coerce
+
+instance Lazy1 (Future a) where
   defer1 = defer
 
-instance Compactable EventF where
-  compact = over EventF $ map join
-  separate (EventF l) =
-    { left: EventF $ bindFlipped (either Just $ const Nothing) <$> l
-    , right: EventF $ bindFlipped hush <$> l
-    }
+instance Apply Future where
+  apply (Future f1) (Future f2) = lift2 apply f1 f2
 
-instance Filterable EventF where
-  filter p = over EventF $ map $ filter p
-  filterMap f = filterMapDefault f
-  partition p l =
-    { yes: filter p l
-    , no: filter (not <<< p) l
-    }
-  partitionMap f = partitionMapDefault f
+instance Applicative Future where
+  pure = Future <<< pure <<< pure
 
-instance Event EventF
+instance Applicative Future where
+  pure = Future <<< pure <<< pure
 
-instance Align EventF where
-  align f (EventF l1) (EventF l2) = EventF $ zipWith zipper l1 l2
-    where
-    zipper Nothing Nothing = Nothing
-    zipper (Just a) Nothing = Just $ f $ This a
-    zipper Nothing (Just a) = Just $ f $ That a
-    zipper (Just a) (Just b) = Just $ f $ Both a b
+instance Alt Future where
+  alt (Future a) (Future b) = Future $ DL.defer \_ -> case force a, force b of
+    Tuple t1 a, Tuple t2 b
+      | t1 <= t2 -> Tuple t1 a
+      | otherwise -> Tuple t2 b
 
-instance Alignable EventF where
-  nil = EventF $ repeat Nothing
+instance Plus Future where
+  empty = Future top $ DL.defer \_ -> unsafeThrow
+    "***Control.Reactive.Model.empty (Future): evaluated empty future"
 
-derive instance Newtype (BehaviourF a) _
-derive instance Functor BehaviourF
-derive newtype instance Apply BehaviourF
-derive newtype instance Applicative BehaviourF
-derive newtype instance Lazy (BehaviourF a)
-derive newtype instance Lazy1 BehaviourF
+instance Alternative Future
 
-instance Behaviour EventF BehaviourF where
-  applyE (BehaviourF fs) (EventF as) = EventF $ zipWith map fs as
+instance Align Future where
+  align f (Future a) (Future b) = Future $ DL.defer \_ ->
+    case force a, force b of
+      Tuple t1 a, Tuple t2 b -> case compare t1 t2 of
+        LT -> Tuple t1 $ f $ This a
+        GT -> Tuple t2 $ f $ That b
+        EQ -> Tuple t1 $ f $ Both a b
 
-instance Reactive EventF BehaviourF ReactM where
-  accumE a e1 = do
-    { e2 } <- mfixRecord \out -> do
-      let e2 = ((#) <$> out.b) <@> e1
-      b <- hold a e2
-      pure { e2, b }
-    pure e2
+instance Alignable Future where
+  nil = empty
 
-  hold a e = do
-    time <- ask
-    pure
-      $ BehaviourF
-      $ replicate time a <> (scanlLazy fromMaybe) a (forgetE time e)
-  sample (BehaviourF l) = do
-    time <- ask
-    pure $ unsafePartial $ fromJust $ l !! time
-  sampleLazy (BehaviourF l) = do
-    time <- ask
-    pure $ defer \_ -> unsafePartial $ fromJust $ l !! time
-  observe = over EventF $ zipWith
-    (\time -> map $ flip runReader time <<< unwrap)
-    (iterate (add 1) 0)
-  switchE es = do
-    t <- ask
-    pure $ EventF $ replicate t Nothing
-      <> switch (un EventF $ A.nil) (forgetE t (forgetDiagonalE es))
-    where
-    switch xs ys = defer \_ -> switch' (unsafeUncons xs) (unsafeUncons ys)
-    switch' { head: x, tail: xs } { head: Nothing, tail: ys } =
-      defer \_ -> x : switch' (unsafeUncons xs) (unsafeUncons ys)
-    switch' { head: x } { head: Just xs, tail: ys } =
-      defer \_ -> x : switch'
-        (unsafeUncons $ unsafePartial $ fromJust $ tail xs)
-        (unsafeUncons ys)
+instance Bind Future where
+  bind (Future fa) k = Future $ DL.defer \_ ->
+    case force fa of
+      Tuple t a -> case force $ coerce $ k a of
+        Tuple t' b -> Tuple (t <> t') b
 
-    unsafeUncons :: forall a. List a -> { head :: a, tail :: List a }
-    unsafeUncons l = unsafePartial $ fromJust $ uncons l
-  switchB b = map diagonalB <$> hold b
-  interpret f as =
-    map (Array.fromFoldable <<< take (Array.length as) <<< unwrap)
-      $ f
-      $ EventF
-      $ Array.toUnfoldable as <> repeat Nothing
+instance Monad Future
 
-forgetE :: forall a. Int -> EventF a -> List (Maybe a)
-forgetE time (EventF as) = drop time as
+instance Semigroup a => Semigroup (Future a) where
+  append = lift2 append
 
-forgetDiagonalE :: forall a. EventF (EventF a) -> EventF (List (Maybe a))
-forgetDiagonalE = over EventF $ zipWith
-  (map <<< forgetE)
-  (iterate (add 1) 0)
-
-diagonalB :: forall a. BehaviourF (BehaviourF a) -> BehaviourF a
-diagonalB = over BehaviourF $ zipWith
-  (\time (BehaviourF l) -> unsafePartial $ fromJust $ l !! time)
-  (iterate (add 1) 0)
+instance Monoid a => Monoid (Future a) where
+  mempty = pure mempty

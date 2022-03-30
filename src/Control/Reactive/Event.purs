@@ -15,7 +15,6 @@ import Data.Filterable (class Filterable, filter, filterMap, partitionMap)
 import Data.Foldable (class Foldable, foldr)
 import Data.Lazy as DL
 import Data.Maybe (Maybe(..))
-import Data.Ord.Max (Max(..))
 import Data.These (These(..))
 import Safe.Coerce (coerce)
 
@@ -43,44 +42,44 @@ import Safe.Coerce (coerce)
 -------------------------------------------------------------------------------
 
 -- | An event parameterized by its `future` type.
-newtype AnEvent future time a = Event (future (AStep future time a))
+newtype AnEvent future a = Event (future (AStep future a))
 
 -- | An event that uses a push-based `Future` implementation.
 type Event = AnEvent FutureFrame
 
-instance Lazy1 future => Lazy (AnEvent future time a) where
+instance Lazy1 future => Lazy (AnEvent future a) where
   defer f = Event $ defer1 $ coerce f
 
-instance Lazy1 future => Lazy1 (AnEvent future time) where
+instance Lazy1 future => Lazy1 (AnEvent future) where
   defer1 = defer
 
-derive instance Functor future => Functor (AnEvent future time)
-instance Alt future => Alt (AnEvent future time) where
+derive instance Functor future => Functor (AnEvent future)
+instance Alt future => Alt (AnEvent future) where
   alt (Event fa) (Event fb) = Event $ fa <|> fb
 
-instance Plus future => Plus (AnEvent future time) where
+instance Plus future => Plus (AnEvent future) where
   empty = Event empty
 
-instance (Ord time, Align future) => Align (AnEvent future time) where
+instance Align future => Align (AnEvent future) where
   align f ea@(Event fa) eb@(Event (fb)) =
     Event $ align alignStep fa fb
     where
-    alignStep (This (Step t a ea')) = Step t (f $ This a) $ align f ea' eb
-    alignStep (That (Step t b eb')) = Step t (f $ That b) $ align f ea eb'
-    alignStep (Both (Step t1 a ea') (Step t2 b eb')) =
-      Step (t1 <> t2) (f $ Both a b) $ align f ea' eb'
+    alignStep (This (Step a ea')) = Step (f $ This a) $ align f ea' eb
+    alignStep (That (Step b eb')) = Step (f $ That b) $ align f ea eb'
+    alignStep (Both (Step a ea') (Step b eb')) =
+      Step (f $ Both a b) $ align f ea' eb'
 
-instance (Ord time, Alignable future) => Alignable (AnEvent future time) where
+instance Alignable future => Alignable (AnEvent future) where
   nil = Event nil
 
-instance (Monad future, Ord time) => Compactable (AnEvent future time) where
+instance Monad future => Compactable (AnEvent future) where
   compact (Event fma) = Event $ fma >>= compactFutureStep
   separate (Event fma) =
     { left: Event $ fma >>= leftFutureStep
     , right: Event $ fma >>= rightFutureStep
     }
 
-instance (Monad future, Ord time) => Filterable (AnEvent future time) where
+instance Monad future => Filterable (AnEvent future) where
   filter p (Event fa) = Event $ fa >>= filterFutureStep p
   filterMap f (Event fa) = Event $ fa >>= filterMapFutureStep f
   partition p e =
@@ -93,82 +92,75 @@ instance (Monad future, Ord time) => Filterable (AnEvent future time) where
     }
 
 compactFutureStep
-  :: forall future time a
-   . Ord time
-  => Monad future
-  => AStep future time (Maybe a)
-  -> future (AStep future time a)
-compactFutureStep (Step _ Nothing ema) = coerce $ compact ema
-compactFutureStep (Step t (Just a) ema) = pure $ Step t a $ compact ema
+  :: forall future a
+   . Monad future
+  => AStep future (Maybe a)
+  -> future (AStep future a)
+compactFutureStep (Step Nothing ema) = coerce $ compact ema
+compactFutureStep (Step (Just a) ema) = pure $ Step a $ compact ema
 
 filterFutureStep
-  :: forall future time a
-   . Ord time
-  => Monad future
+  :: forall future a
+   . Monad future
   => (a -> Boolean)
-  -> AStep future time a
-  -> future (AStep future time a)
-filterFutureStep p (Step t a ea)
+  -> AStep future a
+  -> future (AStep future a)
+filterFutureStep p (Step a ea)
   | p a = coerce $ filter p ea
-  | otherwise = pure $ Step t a ea
+  | otherwise = pure $ Step a ea
 
 filterMapFutureStep
-  :: forall future time a b
-   . Ord time
-  => Monad future
+  :: forall future a b
+   . Monad future
   => (a -> Maybe b)
-  -> AStep future time a
-  -> future (AStep future time b)
-filterMapFutureStep f (Step t a ea) = case f a of
+  -> AStep future a
+  -> future (AStep future b)
+filterMapFutureStep f (Step a ea) = case f a of
   Nothing -> coerce $ filterMap f ea
-  Just b -> pure $ Step t b $ filterMap f ea
+  Just b -> pure $ Step b $ filterMap f ea
 
 leftFutureStep
-  :: forall future time a b
-   . Ord time
-  => Monad future
-  => AStep future time (Either a b)
-  -> future (AStep future time a)
-leftFutureStep (Step t eitherAB eEitherAB) = case eitherAB of
-  Left a -> pure $ Step t a separatedEvent.left
+  :: forall future a b
+   . Monad future
+  => AStep future (Either a b)
+  -> future (AStep future a)
+leftFutureStep (Step eitherAB eEitherAB) = case eitherAB of
+  Left a -> pure $ Step a separatedEvent.left
   _ -> coerce separatedEvent.left
   where
   separatedEvent = separate eEitherAB
 
 leftMapFutureStep
-  :: forall future time a b c
-   . Ord time
-  => Monad future
+  :: forall future a b c
+   . Monad future
   => (a -> Either b c)
-  -> AStep future time a
-  -> future (AStep future time b)
-leftMapFutureStep f (Step t a ea) = case f a of
-  Left b -> pure $ Step t b partitionedEvent.left
+  -> AStep future a
+  -> future (AStep future b)
+leftMapFutureStep f (Step a ea) = case f a of
+  Left b -> pure $ Step b partitionedEvent.left
   _ -> coerce partitionedEvent.left
   where
   partitionedEvent = partitionMap f ea
 
 rightFutureStep
-  :: forall future time a b
-   . Ord time
-  => Monad future
-  => AStep future time (Either a b)
-  -> future (AStep future time b)
-rightFutureStep (Step t eitherAB eEitherAB) = case eitherAB of
-  Right b -> pure $ Step t b separatedEvent.right
+  :: forall future a b
+   . Monad future
+  => AStep future (Either a b)
+  -> future (AStep future b)
+rightFutureStep (Step eitherAB eEitherAB) = case eitherAB of
+  Right b -> pure $ Step b separatedEvent.right
   _ -> coerce separatedEvent.right
   where
   separatedEvent = separate eEitherAB
 
 rightMapFutureStep
-  :: forall future time a b c
-   . Ord time
-  => Monad future
+  :: forall future a b c
+   . Monad future
   => (a -> Either b c)
-  -> AStep future time a
-  -> future (AStep future time c)
-rightMapFutureStep f (Step t a ea) = case f a of
-  Right c -> pure $ Step t c partitionedEvent.right
+  -> AStep future a
+  -> future (AStep future c)
+rightMapFutureStep f (Step a ea) = case f a of
+  Right c -> pure $ Step c partitionedEvent.right
   _ -> coerce partitionedEvent.right
   where
   partitionedEvent = partitionMap f ea
@@ -192,66 +184,59 @@ unions = foldr (unionWith (<<<)) nil
 -------------------------------------------------------------------------------
 
 -- | A Step parameterized by its `future` type.
-data AStep future time a = Step (Max time) a (AnEvent future time a)
+data AStep future a = Step a (AnEvent future a)
 
 -- | A Step that uses a push-based `Future` implementation.
 type Step = AStep FutureFrame
 
-instance Functor future => Functor (AStep future time) where
-  map f (Step t a e) = Step t (f a) $ map f e
+instance Functor future => Functor (AStep future) where
+  map f (Step a e) = Step (f a) $ map f e
 
-instance (Ord time, Alt future, Apply future) => Apply (AStep future time) where
-  apply sf@(Step t1 f ef) sa@(Step t2 a ea) =
-    Step (t1 <> t2) (f a) (applyEventStep ef sa <|> applyStepEvent sf ea)
+instance (Alt future, Apply future) => Apply (AStep future) where
+  apply sf@(Step f ef) sa@(Step a ea) =
+    Step (f a) (applyEventStep ef sa <|> applyStepEvent sf ea)
 
 applyStepEvent
-  :: forall time future a b
+  :: forall future a b
    . Functor future
-  => Ord time
   => Alt future
   => Apply future
-  => AStep future time (a -> b)
-  -> AnEvent future time a
-  -> AnEvent future time b
+  => AStep future (a -> b)
+  -> AnEvent future a
+  -> AnEvent future b
 applyStepEvent sf (Event fa) = Event $ (sf <*> _) <$> fa
 
 applyEventStep
-  :: forall time future a b
+  :: forall future a b
    . Functor future
-  => Ord time
   => Alt future
   => Apply future
-  => AnEvent future time (a -> b)
-  -> AStep future time a
-  -> AnEvent future time b
+  => AnEvent future (a -> b)
+  -> AStep future a
+  -> AnEvent future b
 applyEventStep (Event ff) stepA = Event $ (_ <*> stepA) <$> ff
 
-instance (Bounded time, Alternative future) => Applicative (AStep future time) where
-  pure a = Step mempty a empty
+instance Alternative future => Applicative (AStep future) where
+  pure a = Step a empty
 
-instance (Ord time, Alternative future) => Bind (AStep future time) where
-  bind (Step t a ea) k = case k a of
-    Step t' b eb -> Step (t <> t') b $ eb <|> bindE ea k
+instance Alternative future => Bind (AStep future) where
+  bind (Step a ea) k = case k a of
+    Step b eb -> Step b $ eb <|> bindE ea k
 
 bindE
-  :: forall future time a b
+  :: forall future a b
    . Functor future
-  => Ord time
   => Alternative future
-  => AnEvent future time a
-  -> (a -> AStep future time b)
-  -> AnEvent future time b
+  => AnEvent future a
+  -> (a -> AStep future b)
+  -> AnEvent future b
 bindE (Event fa) k = Event $ map (join <<< (map k)) fa
 
-instance (Bounded time, Alternative future) => Monad (AStep future time)
+instance Alternative future => Monad (AStep future)
 
-instance (Lazy time, Lazy a, Lazy1 future) => Lazy (AStep future time a) where
-  defer f = Step
-    (Max $ defer (\_ -> DL.force dlT))
-    (defer (\_ -> DL.force dlA))
-    (defer (\_ -> DL.force dlE))
+instance (Lazy a, Lazy1 future) => Lazy (AStep future a) where
+  defer f = Step (defer (\_ -> DL.force dlA)) (defer (\_ -> DL.force dlE))
     where
     dlStep = DL.defer f
-    dlT = dlStep <#> case _ of Step (Max t) _ _ -> t
-    dlA = dlStep <#> case _ of Step _ a _ -> a
-    dlE = dlStep <#> case _ of Step _ _ e -> e
+    dlA = dlStep <#> case _ of Step a _ -> a
+    dlE = dlStep <#> case _ of Step _ e -> e

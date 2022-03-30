@@ -8,12 +8,12 @@ import Control.Apply (lift2)
 import Control.Lazy (class Lazy, defer)
 import Control.Lazy.Lazy1 (class Lazy1)
 import Control.Reactive.Event (AStep(..), AnEvent(..))
+import Control.Reactive.Moment (class MonadMoment, moment)
 import Control.Reactive.Prim.Frame.Future (FutureFrame)
 import Control.Reactive.TimeFn (TimeFn, evalTimeFn)
 import Data.Compactable (compact, separate)
 import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
-import Data.Ord.Max (Max(..))
 import Data.Tuple (Tuple(..), uncurry)
 
 -------------------------------------------------------------------------------
@@ -41,53 +41,48 @@ import Data.Tuple (Tuple(..), uncurry)
 -- could quantize a continuous behaviour by sampling it with an event.
 -------------------------------------------------------------------------------
 
-newtype ABehaviour future time a = Behaviour (AStep future time (TimeFn time a))
+newtype ABehaviour future time a = Behaviour (AStep future (TimeFn time a))
 
 type Behaviour = ABehaviour FutureFrame
 
-derive newtype instance
-  ( Lazy time
-  , Lazy1 future
-  ) =>
-  Lazy (ABehaviour future time a)
+derive newtype instance Lazy1 future => Lazy (ABehaviour future time a)
 
-instance (Lazy time, Lazy1 future) => Lazy1 (ABehaviour future time) where
+instance Lazy1 future => Lazy1 (ABehaviour future time) where
   defer1 = defer
 
 derive instance Functor future => Functor (ABehaviour future time)
 
-instance (Ord time, Alt future, Apply future) => Apply (ABehaviour future time) where
+instance (Alt future, Apply future) => Apply (ABehaviour future time) where
   apply (Behaviour f) (Behaviour a) = Behaviour $ lift2 apply f a
 
-instance
-  ( Bounded time
-  , Alternative future
-  ) =>
-  Applicative (ABehaviour future time) where
+instance Alternative future => Applicative (ABehaviour future time) where
   pure = Behaviour <<< pure <<< pure
 
 applyE
   :: forall future time a b
    . Bounded time
+  => MonadMoment time future
   => Alternative future
   => ABehaviour future time (a -> b)
-  -> AnEvent future time a
-  -> AnEvent future time b
-applyE (Behaviour sf) (Event fa) = lift2EStep (uncurry <<< evalTimeFn) sf e'
+  -> AnEvent future a
+  -> AnEvent future b
+applyE (Behaviour sf) (Event ea) = lift2EStep (uncurry <<< evalTimeFn) sf e'
   where
-  e' = Event $ map withTime fa
-  withTime (Step (Max t) a (Event f)) =
-    Step (Max t) (Tuple t a) $ Event $ withTime <$> f
+  e' = Event $ withTime bottom ea
+  withTime lastTime fStep = do
+    Step a (Event ea') <- fStep
+    currentTime <- moment
+    let time = max lastTime currentTime
+    pure $ Step (Tuple time a) $ Event $ withTime time ea'
 
 lift2EStep
-  :: forall future time a b c
-   . Bounded time
-  => Alternative future
+  :: forall future a b c
+   . Alternative future
   => (a -> b -> c)
-  -> AStep future time a
-  -> AnEvent future time b
-  -> AnEvent future time c
-lift2EStep f (Step _ a (Event fa)) (Event fb) =
+  -> AStep future a
+  -> AnEvent future b
+  -> AnEvent future c
+lift2EStep f (Step a (Event fa)) (Event fb) =
   Event $ lift2 (lift2 f) sa' fb
   where
   sa' = fa <|> pure a <$ fb
@@ -95,10 +90,11 @@ lift2EStep f (Step _ a (Event fa)) (Event fb) =
 applyFirstE
   :: forall future time a b
    . Bounded time
+  => MonadMoment time future
   => Alternative future
   => ABehaviour future time a
-  -> AnEvent future time b
-  -> AnEvent future time a
+  -> AnEvent future b
+  -> AnEvent future a
 applyFirstE = applyE <<< map const
 
 infixl 4 applyE as <@>
@@ -107,32 +103,35 @@ infixl 4 applyFirstE as <@
 filterApply
   :: forall future time a
    . Bounded time
+  => MonadMoment time future
   => Alternative future
   => Monad future
   => ABehaviour future time (a -> Boolean)
-  -> AnEvent future time a
-  -> AnEvent future time a
+  -> AnEvent future a
+  -> AnEvent future a
 filterApply bp =
   compact <<< applyE ((\p a -> if p a then Just a else Nothing) <$> bp)
 
 filterMapApply
   :: forall future time a b
    . Bounded time
+  => MonadMoment time future
   => Alternative future
   => Monad future
   => ABehaviour future time (a -> Maybe b)
-  -> AnEvent future time a
-  -> AnEvent future time b
+  -> AnEvent future a
+  -> AnEvent future b
 filterMapApply bp = compact <<< applyE (($) <$> bp)
 
 partitionApply
   :: forall future time a
    . Bounded time
+  => MonadMoment time future
   => Alternative future
   => Monad future
   => ABehaviour future time (a -> Boolean)
-  -> AnEvent future time a
-  -> { yes :: AnEvent future time a, no :: AnEvent future time a }
+  -> AnEvent future a
+  -> { yes :: AnEvent future a, no :: AnEvent future a }
 partitionApply bp =
   relabel <<< separate <<< applyE
     ((\p a -> if p a then Right a else Left a) <$> bp)
@@ -142,9 +141,10 @@ partitionApply bp =
 partitionMapApply
   :: forall future time a b c
    . Bounded time
+  => MonadMoment time future
   => Alternative future
   => Monad future
   => ABehaviour future time (a -> Either b c)
-  -> AnEvent future time a
-  -> { left :: AnEvent future time b, right :: AnEvent future time c }
+  -> AnEvent future a
+  -> { left :: AnEvent future b, right :: AnEvent future c }
 partitionMapApply bp = separate <<< applyE (($) <$> bp)

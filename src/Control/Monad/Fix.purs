@@ -10,12 +10,13 @@ import Control.Monad.Writer.Trans (WriterT(..), runWriterT)
 import Data.Either (Either(..))
 import Data.Identity (Identity(..))
 import Data.Lazy as DL
-import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype, unwrap)
 import Data.Symbol (class IsSymbol)
 import Data.Tuple (Tuple(..), fst, snd)
+import Effect (Effect)
 import Effect.Aff (Aff, error, fiberCanceler, launchAff, makeAff)
 import Effect.Class (liftEffect)
+import Effect.Exception (throw)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Effect.Ref as Ref
 import Effect.Unsafe (unsafePerformEffect)
@@ -56,19 +57,22 @@ message :: String
 message =
   "Control.Monad.Fix: Premature access to result of fixpoint computation."
 
+instance MonadFix Effect where
+  mfix f = do
+    resultRef <- Ref.new $ defer \_ -> unsafeThrow message
+    result <- f $ defer \_ -> unsafePerformEffect $ Ref.read resultRef
+    Ref.write result resultRef
+    pure result
+
 instance MonadFix Aff where
   mfix f = makeAff \resolve -> do
-    resultRef <- Ref.new Nothing
+    resultRef <- Ref.new $ defer \_ -> unsafePerformEffect do
+      resolve $ Left $ error message
+      throw message
     fiber <- launchAff do
-      result <- f $ defer \_ -> unsafePerformEffect do
-        mResult <- Ref.read resultRef
-        case mResult of
-          Nothing -> do
-            resolve $ Left $ error message
-            unsafeThrow message
-          Just a -> pure a
+      result <- f $ defer \_ -> unsafePerformEffect $ Ref.read resultRef
       liftEffect do
-        Ref.write (Just result) resultRef
+        Ref.write result resultRef
         resolve $ Right result
     pure $ fiberCanceler fiber
 
