@@ -16,7 +16,7 @@ import Control.Reactive.Moment
   ( class MonadAdjustMoment
   , class MonadMoment
   , adjustMoment
-  , moment
+  , withMoment
   )
 import Control.Reactive.Prim.Frame.Moment
   ( FrameMoment
@@ -174,9 +174,8 @@ instance MonadFix FutureFrame where
       subscriber a
 
 instance MonadMoment FrameTime FutureFrame where
-  moment = FutureFrame \subscriber -> do
-    subscribe <- scheduleFrameEffect (subscriber =<< moment)
-    subscribe $ pure $ pure unit
+  withMoment (FutureFrame subscribe) = FutureFrame \subscriber ->
+    subscribe $ subscriber <=< withMoment <<< pure
 
 instance MonadAdjustMoment FrameTime FutureFrame where
   adjustMoment f (FutureFrame subscribe) = FutureFrame \subscriber ->

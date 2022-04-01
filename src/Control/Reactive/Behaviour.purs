@@ -1,16 +1,17 @@
 module Control.Reactive.Behaviour where
 
-import Prelude hiding ((<@>))
+import Prelude
 
 import Control.Alt (class Alt, (<|>))
 import Control.Alternative (class Alternative)
 import Control.Apply (lift2)
-import Control.Lazy (class Lazy, defer)
+import Control.Lazy (class Lazy, defer, fix)
 import Control.Lazy.Lazy1 (class Lazy1)
+import Control.Monad.Fix (LazyRecord(..))
 import Control.Reactive.Event (AStep(..), AnEvent(..))
-import Control.Reactive.Moment (class MonadMoment, moment)
+import Control.Reactive.Moment (class MonadMoment, withMoment)
 import Control.Reactive.Prim.Frame.Future (FutureFrame)
-import Control.Reactive.TimeFn (TimeFn, evalTimeFn)
+import Control.Reactive.TimeFn (TimeFn(..), evalTimeFn)
 import Data.Compactable (compact, separate)
 import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
@@ -58,6 +59,14 @@ instance (Alt future, Apply future) => Apply (ABehaviour future time) where
 instance Alternative future => Applicative (ABehaviour future time) where
   pure = Behaviour <<< pure <<< pure
 
+instance Alternative future => Bind (ABehaviour future time) where
+  bind (Behaviour step) k = Behaviour $ bindStep step
+    where
+    bindStep (Step tfa (Event ftfa)) = Step tfb etfb
+      where
+      tfb = tfa >>= k >>> case _ of (Behaviour (Step tfb' _)) -> tfb'
+      etfb = Event $ bindStep <$> ftfa
+
 applyE
   :: forall future time a b
    . Bounded time
@@ -68,12 +77,11 @@ applyE
   -> AnEvent future b
 applyE (Behaviour sf) (Event ea) = lift2EStep (uncurry <<< evalTimeFn) sf e'
   where
-  e' = Event $ withTime bottom ea
-  withTime lastTime fStep = do
-    Step a (Event ea') <- fStep
-    currentTime <- moment
+  e' = Event $ withMoment' bottom ea
+  withMoment' lastTime fStep = do
+    Tuple currentTime (Step a (Event ea')) <- withMoment fStep
     let time = max lastTime currentTime
-    pure $ Step (Tuple time a) $ Event $ withTime time ea'
+    pure $ Step (Tuple time a) $ Event $ withMoment' time ea'
 
 lift2EStep
   :: forall future a b c
@@ -97,8 +105,8 @@ applyFirstE
   -> AnEvent future a
 applyFirstE = applyE <<< map const
 
-infixl 4 applyE as <@>
-infixl 4 applyFirstE as <@
+infixl 4 applyE as <&>
+infixl 4 applyFirstE as <&
 
 filterApply
   :: forall future time a
@@ -148,3 +156,48 @@ partitionMapApply
   -> AnEvent future a
   -> { left :: AnEvent future b, right :: AnEvent future c }
 partitionMapApply bp = separate <<< applyE (($) <$> bp)
+
+stepper
+  :: forall future time a
+   . Functor future
+  => a
+  -> AnEvent future a
+  -> ABehaviour future time a
+stepper a e = Behaviour $ Step (K a) (K <$> e)
+
+switcher
+  :: forall future time a
+   . Alternative future
+  => ABehaviour future time a
+  -> AnEvent future (ABehaviour future time a)
+  -> ABehaviour future time a
+switcher a = join <<< stepper a
+
+accumE
+  :: forall time future a
+   . Bounded time
+  => MonadMoment time future
+  => Alternative future
+  => a
+  -> AnEvent future (a -> a)
+  -> AnEvent future a
+accumE a e1 =
+  let
+    LazyRecord { e2 } = fix \(LazyRecord out) ->
+      let
+        e2 = ((#) <$> out.b) <&> e1
+        b = stepper a e2 :: ABehaviour future time _
+      in
+        LazyRecord { e2, b }
+  in
+    e2
+
+accumB
+  :: forall time future a
+   . Bounded time
+  => MonadMoment time future
+  => Alternative future
+  => a
+  -> AnEvent future (a -> a)
+  -> ABehaviour future time a
+accumB a = stepper a <<< accumE a

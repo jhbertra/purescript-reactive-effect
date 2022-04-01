@@ -4,8 +4,10 @@ import Prelude
 
 import Control.Alt (class Alt, (<|>))
 import Control.Alternative (class Alternative, class Plus)
+import Control.Apply (lift2)
 import Control.Lazy (class Lazy, defer)
 import Control.Lazy.Lazy1 (class Lazy1, defer1)
+import Control.MonadPlus (class MonadPlus)
 import Control.Plus (empty)
 import Control.Reactive.Prim.Frame.Future (FutureFrame)
 import Data.Align (class Align, class Alignable, align, nil)
@@ -54,6 +56,10 @@ instance Lazy1 future => Lazy1 (AnEvent future) where
   defer1 = defer
 
 derive instance Functor future => Functor (AnEvent future)
+
+instance (Apply future, Alt future) => Apply (AnEvent future) where
+  apply (Event f) (Event a) = Event $ lift2 apply f a
+
 instance Alt future => Alt (AnEvent future) where
   alt (Event fa) (Event fb) = Event $ fa <|> fb
 
@@ -68,6 +74,16 @@ instance Align future => Align (AnEvent future) where
     alignStep (That (Step b eb')) = Step (f $ That b) $ align f ea eb'
     alignStep (Both (Step a ea') (Step b eb')) =
       Step (f $ Both a b) $ align f ea' eb'
+
+instance Alternative future => Applicative (AnEvent future) where
+  pure = Event <<< pure <<< pure
+
+instance (Bind future, Alt future) => Bind (AnEvent future) where
+  bind (Event fa) k = Event $ fa >>= k' >>> \(Event fb) -> fb
+    where
+    k' (Step a ea) = k a <|> (ea >>= k)
+
+instance MonadPlus future => Monad (AnEvent future)
 
 instance Alignable future => Alignable (AnEvent future) where
   nil = Event nil
@@ -174,6 +190,17 @@ unionWith f = align case _ of
 unions
   :: forall t f a. Alignable f => Foldable t => t (f (a -> a)) -> f (a -> a)
 unions = foldr (unionWith (<<<)) nil
+
+switcherE
+  :: forall future a
+   . Monad future
+  => AnEvent future (AnEvent future a)
+  -> AnEvent future a
+switcherE (Event fea) = Event $ fea >>= switcherR
+  where
+  switcherR (Step (Event fa) eea) = do
+    Step a _ <- fa
+    pure $ Step a $ switcherE eea
 
 -------------------------------------------------------------------------------
 -- Step - an intermediate type that is used to represent both events and

@@ -4,6 +4,7 @@ import Prelude
 
 import Control.Lazy.Lazy1 (class Lazy1)
 import Control.Monad.Fix (class MonadFix)
+import Data.Tuple (Tuple)
 
 -- A class for computations that occur in a single moment of logical time.
 -- Observable simulteneity is required for the semantics of an FRP
@@ -26,8 +27,8 @@ import Control.Monad.Fix (class MonadFix)
 --   -- Immutability (the time is constant for the whole computation):
 --   now *> m *> now = now
 class (Bounded t, MonadFix m, Lazy1 m) <= MonadMoment t m | m -> t where
-  -- | The moment that the computation occurs in.
-  moment :: m t
+  -- | Add the current moment to a given computation
+  withMoment :: forall a. m a -> m (Tuple t a)
 
 -- An extension of `MonadMoment` that allows offsetting the time observed by
 -- another computation.
