@@ -3,9 +3,7 @@
 , repository = "https://github.com/jhbertra/purescript-frp.git"
 , dependencies =
   [ "aff"
-  , "arrays"
   , "control"
-  , "debug"
   , "effect"
   , "either"
   , "enums"
