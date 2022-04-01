@@ -35,6 +35,7 @@ import Safe.Coerce (coerce)
 
 newtype Time = Time (DL.Lazy Int)
 
+derive newtype instance Show Time
 derive instance Eq Time
 derive instance Ord Time
 instance Enum Time where

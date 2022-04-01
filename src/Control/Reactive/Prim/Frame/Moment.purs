@@ -22,6 +22,7 @@ import Data.Exists (Exists, mkExists, runExists)
 import Data.Lazy (Lazy, defer)
 import Data.List (List(..), (:))
 import Data.Maybe (Maybe(..))
+import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Aff (Aff, effectCanceler, makeAff)
 import Effect.Class (class MonadEffect, liftEffect)
@@ -64,7 +65,7 @@ derive newtype instance MonadThrow Error FrameMoment
 derive newtype instance MonadError Error FrameMoment
 derive newtype instance Lazy1 FrameMoment
 instance MonadMoment FrameTime FrameMoment where
-  moment = FrameMoment $ asks _.time
+  withMoment (FrameMoment ra) = FrameMoment $ Tuple <$> asks _.time <*> ra
 
 instance MonadAdjustMoment FrameTime FrameMoment where
   adjustMoment f (FrameMoment m) = FrameMoment $
