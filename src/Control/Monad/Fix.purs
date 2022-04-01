@@ -79,6 +79,9 @@ instance MonadFix Aff where
 instance MonadFix (Function r) where
   mfix f r = fix (flip f r)
 
+instance MonadFix DL.Lazy where
+  mfix f = DL.defer \_ -> fix (DL.force <<< f)
+
 instance (MonadFix m) => MonadFix (ReaderT r m) where
   mfix f = ReaderT \r -> mfix (flip runReaderT r <<< f)
 
