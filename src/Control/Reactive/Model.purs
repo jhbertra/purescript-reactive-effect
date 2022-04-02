@@ -26,7 +26,14 @@ import Data.Filterable (filter)
 import Data.Lazy (force)
 import Data.Lazy as DL
 import Data.List (List(..), (:))
+import Data.List as L
+import Data.List.Lazy as LL
+import Data.List.Lazy.NonEmpty as LLN
+import Data.List.NonEmpty as LN
 import Data.Maybe (Maybe(..), maybe)
+import Data.Newtype (unwrap)
+import Data.NonEmpty ((:|))
+import Data.Ord.Down (Down(..))
 import Data.These (These(..))
 import Data.Tuple (Tuple(..), fst, uncurry)
 import Data.Unfoldable (unfoldr)
@@ -60,9 +67,19 @@ instance Monoid Time where
 instance Lazy Time where
   defer f = Time $ DL.defer \_ -> force $ coerce $ f unit
 
-data Future a = Future Time (DL.Lazy a)
+data Future a = Future (LLN.NonEmptyList Time) (DL.Lazy a)
 
-futureTime :: forall a. Future a -> Time
+instance Eq a => Eq (Future a) where
+  eq (Future t1 a) (Future t2 b)
+    | (LLN.head t1) == top || (LLN.head t2) == top = LLN.head t1 == LLN.head t2
+    | otherwise = (LLN.head t1) == (LLN.head t2) && a == b
+
+instance Show a => Show (Future a) where
+  show (Future t a)
+    | (LLN.head t) == top = "empty"
+    | otherwise = "(Future " <> show t <> " " <> show a <> ")"
+
+futureTime :: forall a. Future a -> LLN.NonEmptyList Time
 futureTime (Future t _) = t
 
 type Event = AnEvent Future
@@ -73,35 +90,48 @@ derive instance Functor Future
 
 instance Lazy (Future a) where
   defer f = Future
-    (defer $ f >>> futureTime)
+    (LLN.NonEmptyList $ defer $ f >>> futureTime >>> coerce)
     (DL.defer \_ -> case f unit of Future _ a -> force a)
 
 instance Lazy1 Future where
   defer1 = defer
 
 instance Apply Future where
-  apply (Future t1 f) (Future t2 a) = Future (t1 <> t2) $ apply f a
+  apply
+    (Future (LLN.NonEmptyList lts1) f)
+    (Future (LLN.NonEmptyList lts2) a) =
+    Future (unwrap <$> mergedTimes) $ apply f a
+    where
+    mergedTimes = LLN.NonEmptyList $ DL.defer \_ ->
+      let
+        t1 :| ts1 = force lts1
+        t2 :| ts2 = force lts2
+        ts1' = LN.NonEmptyList $ t1 :| L.fromFoldable ts1
+        ts2' = LN.NonEmptyList $ t2 :| L.fromFoldable ts2
+        LN.NonEmptyList (t :| ts) = LN.sort $ map Down $ ts1' <> ts2'
+      in
+        t :| LL.fromFoldable ts
 
 instance Applicative Future where
-  pure = Future mempty <<< pure
+  pure = Future (pure mempty) <<< pure
 
 instance Alt Future where
   alt (Future t1 a) (Future t2 b) = Future
-    (liftLazy $ futureTime <$> lFuture)
+    (LLN.NonEmptyList $ liftLazy $ coerce $ futureTime <$> lFuture)
     (DL.defer \_ -> case force lFuture of Future _ a' -> force a')
     where
     lFuture = DL.defer \_ ->
       if t1 <= t2 then Future t1 a else Future t2 b
 
 instance Plus Future where
-  empty = Future top $ DL.defer \_ -> unsafeThrow
+  empty = Future (pure top) $ DL.defer \_ -> unsafeThrow
     "***Control.Reactive.Model.empty (Future): evaluated empty future"
 
 instance Alternative Future
 
 instance Align Future where
   align f (Future t1 a) (Future t2 b) = Future
-    (liftLazy $ futureTime <$> lFuture)
+    (LLN.NonEmptyList $ liftLazy $ coerce $ futureTime <$> lFuture)
     (DL.defer \_ -> case force lFuture of Future _ a' -> force a')
     where
     lFuture = DL.defer \_ ->
@@ -114,14 +144,24 @@ instance Alignable Future where
   nil = empty
 
 instance Bind Future where
-  bind (Future t fa) k = Future
-    (liftLazy $ futureTime <$> lFuture)
+  bind (Future (LLN.NonEmptyList t) fa) k = Future
+    (LLN.NonEmptyList $ liftLazy $ coerce $ futureTime <$> lFuture)
     (DL.defer \_ -> case force lFuture of Future _ a -> force a)
     where
     lFuture = DL.defer \_ ->
       case force fa of
         a -> case k a of
-          Future t' b -> Future (t <> t') b
+          Future (LLN.NonEmptyList t') b ->
+            let
+              t1 :| ts1 = force t
+              t2 :| ts2 = force t'
+              ts1' = LN.NonEmptyList $ t1 :| L.fromFoldable ts1
+              ts2' = LN.NonEmptyList $ t2 :| L.fromFoldable ts2
+              LN.NonEmptyList (t :| ts) = LN.sort $ map Down $ ts1' <> ts2'
+              mergedTimes =
+                LLN.NonEmptyList $ DL.defer \_ -> t :| LL.fromFoldable ts
+            in
+              Future (unwrap <$> mergedTimes) b
 
 instance MonadFix Future where
   mfix f =
@@ -130,14 +170,14 @@ instance MonadFix Future where
         Future t a' -> Tuple (Future t a') $ DL.force a'
     in
       Future
-        (liftLazy $ futureTime <$> lFuture)
+        (LLN.NonEmptyList $ liftLazy $ coerce $ futureTime <$> lFuture)
         (DL.defer \_ -> case force lFuture of Future _ a -> force a)
 
 instance MonadMoment Time Future where
-  withMoment (Future time a) = Future time (Tuple time <$> a)
+  withMoment (Future time a) = Future time (Tuple (LLN.head time) <$> a)
 
 instance MonadAdjustMoment Time Future where
-  adjustMoment f (Future time a) = Future (f time) a
+  adjustMoment f (Future time a) = Future (f <$> time) a
 
 instance Monad Future
 
@@ -155,10 +195,10 @@ interpret
 interpret build occs = eventToList $ build $ listToEvent bottom occs
   where
   eventToList =
-    unfoldr (uncurry (map uncurry unforlEvent)) <<< Tuple occs <<< Tuple 0
-  unforlEvent Nil _ _ = Nothing
-  unforlEvent (_ : as) elapsed e@(Event (Future time step)) = Just
-    if fromEnum time == elapsed then
+    unfoldr (uncurry (map uncurry unfoldEvent)) <<< Tuple occs <<< Tuple 0
+  unfoldEvent Nil _ _ = Nothing
+  unfoldEvent (_ : as) elapsed e@(Event (Future time step)) = Just
+    if fromEnum (LLN.head time) == elapsed then
       let Step b event = force step in mkNext (Just b) event
     else
       mkNext Nothing e
@@ -167,6 +207,6 @@ interpret build occs = eventToList $ build $ listToEvent bottom occs
   listToEvent time = case _ of
     Nil -> nil
     Nothing : as -> next as
-    Just a : as -> Event $ Future time $ DL.defer \_ -> Step a $ next as
+    Just a : as -> Event $ Future (pure time) $ DL.defer \_ -> Step a $ next as
     where
     next = maybe (const nil) listToEvent $ succ time
