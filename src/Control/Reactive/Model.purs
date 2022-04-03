@@ -12,7 +12,8 @@ import Control.Plus (class Plus)
 import Control.Reactive.Behaviour (ABehaviour)
 import Control.Reactive.Event (AStep(..), AnEvent(..))
 import Control.Reactive.Moment (class MonadAdjustMoment, class MonadMoment)
-import Data.Align (class Align, class Alignable, nil)
+import Data.Align (class Align, class Alignable, align, nil)
+import Data.Array as Array
 import Data.Enum
   ( class BoundedEnum
   , class Enum
@@ -30,11 +31,11 @@ import Data.List as L
 import Data.List.Lazy as LL
 import Data.List.Lazy.NonEmpty as LLN
 import Data.List.NonEmpty as LN
-import Data.Maybe (Maybe(..), maybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Newtype (unwrap)
 import Data.NonEmpty ((:|))
 import Data.Ord.Down (Down(..))
-import Data.These (These(..))
+import Data.These (These(..), theseLeft, theseRight)
 import Data.Tuple (Tuple(..), fst, uncurry)
 import Data.Unfoldable (unfoldr)
 import Effect.Exception.Unsafe (unsafeThrow)
@@ -133,7 +134,11 @@ instance Alt Future where
     (DL.defer \_ -> case force lFuture of Future _ a' -> force a')
     where
     lFuture = DL.defer \_ ->
-      if t1 <= t2 then Future t1 a else Future t2 b
+      if t1' <= t2' then Future t1 a else Future t2 b
+    t1a = Array.fromFoldable t1
+    t2a = Array.fromFoldable t2
+    t1' = align (fromMaybe top <<< theseLeft) t1a t2a
+    t2' = align (fromMaybe top <<< theseRight) t1a t2a
 
 instance Plus Future where
   empty = Future (pure top) $ DL.defer \_ -> unsafeThrow
