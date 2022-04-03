@@ -144,7 +144,7 @@ instance Align Future where
     (DL.defer \_ -> case force lFuture of Future _ a' -> force a')
     where
     lFuture = DL.defer \_ ->
-      case compare t1 t2 of
+      case compare (LLN.head t1) (LLN.head t2) of
         LT -> Future t1 $ f <<< This <$> a
         GT -> Future t2 $ f <<< That <$> b
         EQ -> Future t1 $ map f $ Both <$> a <*> b
