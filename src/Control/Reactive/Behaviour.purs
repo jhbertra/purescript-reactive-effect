@@ -8,14 +8,19 @@ import Control.Apply (lift2)
 import Control.Lazy (class Lazy, defer, fix)
 import Control.Lazy.Lazy1 (class Lazy1)
 import Control.Monad.Fix (LazyRecord(..))
+import Control.Monad.Rec.Class (Step(..), tailRec)
 import Control.Reactive.Event (AStep(..), AnEvent(..))
+import Control.Reactive.Model (Future(..), Time(..))
 import Control.Reactive.Moment (class MonadMoment, withMoment)
 import Control.Reactive.Prim.Frame.Future (FutureFrame)
 import Control.Reactive.TimeFn (TimeFn(..), evalTimeFn)
 import Data.Compactable (compact, separate)
 import Data.Either (Either(..))
+import Data.Lazy (force)
+import Data.List.Lazy.NonEmpty as LLN
 import Data.Maybe (Maybe(..))
 import Data.Tuple (Tuple(..), uncurry)
+import Safe.Coerce (coerce)
 
 -------------------------------------------------------------------------------
 -- Behaviours - semantically, `time -> a`.
@@ -45,6 +50,7 @@ import Data.Tuple (Tuple(..), uncurry)
 newtype ABehaviour future time a = Behaviour (AStep future (TimeFn time a))
 
 type Behaviour = ABehaviour FutureFrame
+type BehaviourModel = ABehaviour Future Time
 
 derive newtype instance Lazy1 future => Lazy (ABehaviour future time a)
 
@@ -80,8 +86,8 @@ applyE (Behaviour sf) (Event ea) = lift2EStep (uncurry <<< evalTimeFn) sf e'
   e' = Event $ withMoment' bottom ea
   withMoment' lastTime fStep = do
     Tuple currentTime (Step a (Event ea')) <- withMoment fStep
-    let time = max lastTime currentTime
-    pure $ Step (Tuple time a) $ Event $ withMoment' time ea'
+    let t = max lastTime currentTime
+    pure $ Step (Tuple t a) $ Event $ withMoment' t ea'
 
 lift2EStep
   :: forall future a b c
@@ -204,3 +210,12 @@ accumB a = stepper a <<< accumE a
 
 time :: forall time future. Plus future => ABehaviour future time time
 time = Behaviour $ Step identity empty
+
+denotationB :: forall a. BehaviourModel a -> Int -> a
+denotationB (Behaviour step) t = evalTimeFn fn $ Time $ pure t
+  where
+  fn = tailRec iterStep step
+  iterStep (Step fn' (Event (Future time' step')))
+    | force (coerce (LLN.head time')) > t = Done fn'
+    | LLN.head time' == top = Done fn'
+    | otherwise = Loop $ force step'

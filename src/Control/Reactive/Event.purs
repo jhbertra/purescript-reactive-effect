@@ -4,21 +4,30 @@ import Prelude
 
 import Control.Alt (class Alt, (<|>))
 import Control.Alternative (class Alternative, class Plus)
-import Control.Apply (lift2)
 import Control.Lazy (class Lazy, defer)
 import Control.Lazy.Lazy1 (class Lazy1, defer1)
-import Control.MonadPlus (class MonadPlus)
 import Control.Plus (empty)
+import Control.Reactive.Model (Future(..), future)
 import Control.Reactive.Prim.Frame.Future (FutureFrame)
 import Data.Align (class Align, class Alignable, align, nil)
 import Data.Compactable (class Compactable, compact, separate)
 import Data.Either (Either(..))
+import Data.Enum (fromEnum, toEnum)
 import Data.Filterable (class Filterable, filter, filterMap, partitionMap)
 import Data.Foldable (class Foldable, foldr)
+import Data.FoldableWithIndex (foldrWithIndex)
+import Data.Lazy (force)
 import Data.Lazy as DL
-import Data.Maybe (Maybe(..))
+import Data.List ((:))
+import Data.List as L
+import Data.List.Lazy (List)
+import Data.List.Lazy.NonEmpty as LLN
+import Data.Maybe (Maybe(..), maybe)
 import Data.These (These(..))
+import Data.Tuple (Tuple(..), uncurry)
+import Data.Unfoldable (unfoldr)
 import Safe.Coerce (coerce)
+import Test.Data.Observe (class Observable, observe)
 
 -------------------------------------------------------------------------------
 -- Events: semantically, List (Tuple time value)
@@ -46,8 +55,15 @@ import Safe.Coerce (coerce)
 -- | An event parameterized by its `future` type.
 newtype AnEvent future a = Event (future (AStep future a))
 
+instance
+  Observable t o a =>
+  Observable t (List (Tuple Int o)) (AnEvent Future a) where
+  observe t = map (map (observe t)) <<< denotationE
+
 -- | An event that uses a push-based `Future` implementation.
 type Event = AnEvent FutureFrame
+type EventModel = AnEvent Future
+type StepModel = AStep Future
 
 instance Lazy1 future => Lazy (AnEvent future a) where
   defer f = Event $ defer1 $ coerce f
@@ -56,9 +72,6 @@ instance Lazy1 future => Lazy1 (AnEvent future) where
   defer1 = defer
 
 derive instance Functor future => Functor (AnEvent future)
-
-instance (Apply future, Alt future) => Apply (AnEvent future) where
-  apply (Event f) (Event a) = Event $ lift2 apply f a
 
 instance Alt future => Alt (AnEvent future) where
   alt (Event fa) (Event fb) = Event $ fa <|> fb
@@ -74,16 +87,6 @@ instance Align future => Align (AnEvent future) where
     alignStep (That (Step b eb')) = Step (f $ That b) $ align f ea eb'
     alignStep (Both (Step a ea') (Step b eb')) =
       Step (f $ Both a b) $ align f ea' eb'
-
-instance Alternative future => Applicative (AnEvent future) where
-  pure = Event <<< pure <<< pure
-
-instance (Bind future, Alt future) => Bind (AnEvent future) where
-  bind (Event fa) k = Event $ fa >>= k' >>> \(Event fb) -> fb
-    where
-    k' (Step a ea) = k a <|> (ea >>= k)
-
-instance MonadPlus future => Monad (AnEvent future)
 
 instance Alignable future => Alignable (AnEvent future) where
   nil = Event nil
@@ -122,8 +125,8 @@ filterFutureStep
   -> AStep future a
   -> future (AStep future a)
 filterFutureStep p (Step a ea)
-  | p a = coerce $ filter p ea
-  | otherwise = pure $ Step a ea
+  | p a = pure $ Step a ea
+  | otherwise = coerce $ filter p ea
 
 filterMapFutureStep
   :: forall future a b
@@ -201,6 +204,36 @@ switcherE (Event fea) = Event $ fea >>= switcherR
   switcherR (Step (Event fa) eea) = do
     Step a _ <- fa
     pure $ Step a $ switcherE eea
+
+interpret
+  :: forall a b
+   . (EventModel a -> EventModel b)
+  -> L.List (Maybe a)
+  -> L.List (Maybe b)
+interpret build as = eventToList $ build $ listToEvent
+  where
+  eventToList =
+    unfoldr (uncurry (map uncurry unfoldEvent)) <<< Tuple as <<< Tuple 0
+  unfoldEvent L.Nil _ _ = Nothing
+  unfoldEvent (_ : as') elapsed e@(Event (Future time step)) = Just
+    if fromEnum (LLN.head time) == elapsed then
+      let Step b event = force step in mkNext (Just b) event
+    else
+      mkNext Nothing e
+    where
+    mkNext ma event = Tuple ma $ Tuple as' $ Tuple (elapsed + 1) event
+  listToEvent = foldrWithIndex foldEvent nil as
+  foldEvent i ma next = case ma of
+    Nothing -> next
+    Just a -> maybe next Event $ future <$> toEnum i <@> Step a next
+
+denotationE :: forall a. EventModel a -> List (Tuple Int a)
+denotationE = unfoldr unfoldEvent
+  where
+  unfoldEvent (Event (Future time step))
+    | LLN.head time == top = Nothing
+    | otherwise = Just case force step of
+        Step a event -> Tuple (Tuple (fromEnum $ LLN.head time) a) event
 
 -------------------------------------------------------------------------------
 -- Step - an intermediate type that is used to represent both events and

@@ -25,11 +25,19 @@ import Data.Ord.Min (Min)
 import Data.Semigroup.First (First(..))
 import Data.Semigroup.Last (Last(..))
 import Data.String.NonEmpty.Internal (NonEmptyString)
+import Data.Symbol (class IsSymbol)
 import Data.These (These)
 import Data.Tuple (Tuple(..))
+import Prim.Row as R
+import Prim.RowList (class RowToList, RowList)
+import Prim.RowList as RL
+import Record as Record
+import Record.Builder (Builder, build)
+import Record.Builder as Builder
 import Safe.Coerce (coerce)
 import Test.QuickCheck (class Arbitrary, Result, (<?>))
 import Test.QuickCheck.Laws (A(..), B(..), C(..), D(..), E(..))
+import Type.Proxy (Proxy(..))
 import Unsafe.Coerce (unsafeCoerce)
 
 class
@@ -171,6 +179,38 @@ instance Observable t o a => Observable t o (Max a) where
 
 instance (Arbitrary a, Ord b, Show b) => Observable a b (a -> b) where
   observe = applyFlipped
+
+instance
+  ( RowToList r rl
+  , Arbitrary { | rt }
+  , Ord { | ro }
+  , Show { | ro }
+  , ObservableRecord rl rt ro r
+  ) =>
+  Observable { | rt } { | ro } { | r } where
+  observe = build <<< observeRecord (Proxy :: _ rl)
+
+class ObservableRecord (rl :: RowList Type) rt ro r | rl -> rt ro r where
+  observeRecord :: Proxy rl -> { | rt } -> Builder { | r } { | ro }
+
+instance ObservableRecord RL.Nil rt r r where
+  observeRecord _ _ = identity
+
+instance
+  ( IsSymbol label
+  , R.Cons label t rt' rt
+  , R.Cons label o rx ro
+  , R.Cons label a rx ro'
+  , R.Cons label a r' r
+  , Observable t o a
+  , ObservableRecord rl rt ro' r
+  ) =>
+  ObservableRecord (RL.Cons label a rl) rt ro r where
+  observeRecord _ rt = Builder.modify label (observe t) <<< observeRecord rl rt
+    where
+    label = Proxy :: _ label
+    rl = Proxy :: _ rl
+    t = Record.get label rt
 
 observeDefault :: forall a. Eq a => Show a => Unit -> a -> a
 observeDefault = const identity
