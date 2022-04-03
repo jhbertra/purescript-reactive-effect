@@ -24,6 +24,7 @@ import Data.Enum
   , toEnum
   )
 import Data.Filterable (filter)
+import Data.FoldableWithIndex (foldrWithIndex)
 import Data.Lazy (force)
 import Data.Lazy as DL
 import Data.List (List(..), (:))
@@ -31,7 +32,7 @@ import Data.List as L
 import Data.List.Lazy as LL
 import Data.List.Lazy.NonEmpty as LLN
 import Data.List.NonEmpty as LN
-import Data.Maybe (Maybe(..), fromMaybe, maybe)
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Newtype (unwrap)
 import Data.NonEmpty ((:|))
 import Data.Ord.Down (Down(..))
@@ -209,21 +210,19 @@ interpret
    . (Event a -> Event b)
   -> List (Maybe a)
   -> List (Maybe b)
-interpret build occs = eventToList $ build $ listToEvent bottom occs
+interpret build as = eventToList $ build $ listToEvent
   where
   eventToList =
-    unfoldr (uncurry (map uncurry unfoldEvent)) <<< Tuple occs <<< Tuple 0
+    unfoldr (uncurry (map uncurry unfoldEvent)) <<< Tuple as <<< Tuple 0
   unfoldEvent Nil _ _ = Nothing
-  unfoldEvent (_ : as) elapsed e@(Event (Future time step)) = Just
+  unfoldEvent (_ : as') elapsed e@(Event (Future time step)) = Just
     if fromEnum (LLN.head time) == elapsed then
       let Step b event = force step in mkNext (Just b) event
     else
       mkNext Nothing e
     where
-    mkNext ma event = Tuple ma $ Tuple as $ Tuple (elapsed + 1) event
-  listToEvent time = case _ of
-    Nil -> nil
-    Nothing : as -> next as
-    Just a : as -> Event $ Future (pure time) $ DL.defer \_ -> Step a $ next as
-    where
-    next = maybe (const nil) listToEvent $ succ time
+    mkNext ma event = Tuple ma $ Tuple as' $ Tuple (elapsed + 1) event
+  listToEvent = foldrWithIndex foldEvent nil as
+  foldEvent i ma next = case ma of
+    Nothing -> next
+    Just a -> Event $ Future (pure $ Time $ pure i) $ pure $ Step a next

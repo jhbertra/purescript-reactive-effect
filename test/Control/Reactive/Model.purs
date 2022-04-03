@@ -3,9 +3,12 @@ module Test.Control.Reactive.Model where
 import Prelude
 
 import Control.Alt ((<|>))
+import Control.Alternative (empty)
 import Control.Monad.Gen (chooseInt)
-import Control.Reactive.Model (Future(..), Time(..))
+import Control.Reactive.Model (Event, Future(..), Time(..), interpret)
 import Data.Lazy (Lazy)
+import Data.List (List)
+import Data.Maybe (Maybe(..))
 import Test.Control.Alt (altSpec)
 import Test.Control.Alternative (alternativeSpec)
 import Test.Control.Applicative (applicativeSpec)
@@ -26,6 +29,7 @@ import Test.QuickCheck.Extra (quickCheckGen)
 import Test.QuickCheck.Gen (Gen)
 import Test.QuickCheck.Laws (A, B)
 import Test.Spec (Spec, describe, it)
+import Test.Spec.QuickCheck (quickCheck)
 
 modelSpec :: Spec Unit
 modelSpec = describe "Control.Reactive.Model" do
@@ -83,3 +87,11 @@ futureSpec = describe "Future" do
           f2 <- Future (pure (max t1 t2)) <$> (arbitrary :: Gen (Lazy A))
           f3 <- Future (pure (min t1 t2)) <$> (arbitrary :: Gen (Lazy B))
           pure $ f1 <|> f2 <* f3 =-= f2
+
+  describe "interpret" do
+    it "obeys law: identity" do
+      quickCheck \(as :: List (Maybe A)) ->
+        interpret identity as =-= as
+    it "obeys law: annihilation" do
+      quickCheck \(as :: List (Maybe A)) ->
+        interpret (const (empty :: Event B)) as =-= Nothing <$ as
