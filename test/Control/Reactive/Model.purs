@@ -20,6 +20,7 @@ import Test.Data.Ord (ordSpec)
 import Test.Data.Semigroup (semigroupSpec)
 import Test.QuickCheck (arbitrary)
 import Test.QuickCheck.Gen (Gen)
+import Test.QuickCheck.Laws (A)
 import Test.Spec (Spec, describe)
 
 modelSpec :: Spec Unit
@@ -44,7 +45,7 @@ genFuture genA = Future <$> (pure <$> genTime) <*> (pure <$> genA)
 
 futureSpec :: Spec Unit
 futureSpec = describe "Future" do
-  eqSpec $ genFuture (arbitrary :: Gen Ordering)
+  eqSpec $ genFuture (arbitrary :: Gen A)
   functorSpec genFuture
   applySpec genFuture
   applicativeSpec genFuture

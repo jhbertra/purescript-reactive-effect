@@ -39,8 +39,12 @@ import Data.Tuple (Tuple(..), fst, uncurry)
 import Data.Unfoldable (unfoldr)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Safe.Coerce (coerce)
+import Test.Data.Observe (class Observable, observe)
 
 newtype Time = Time (DL.Lazy Int)
+
+instance Observable Unit Int Time where
+  observe _ (Time t) = force t
 
 derive newtype instance Show Time
 derive instance Eq Time
@@ -68,6 +72,14 @@ instance Lazy Time where
   defer f = Time $ DL.defer \_ -> force $ coerce $ f unit
 
 data Future a = Future (LLN.NonEmptyList Time) (DL.Lazy a)
+
+instance Observable t o a => Observable t (Tuple Int (Maybe o)) (Future a) where
+  observe t (Future time a) = Tuple (observe unit time') o
+    where
+    time' = LLN.head time
+    o
+      | time' == top = Nothing
+      | otherwise = Just $ observe t a
 
 instance Eq a => Eq (Future a) where
   eq (Future t1 a) (Future t2 b)
