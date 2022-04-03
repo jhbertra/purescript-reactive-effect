@@ -3,7 +3,7 @@ module Control.Reactive.Behaviour where
 import Prelude
 
 import Control.Alt (class Alt, (<|>))
-import Control.Alternative (class Alternative)
+import Control.Alternative (class Alternative, class Plus, empty)
 import Control.Apply (lift2)
 import Control.Lazy (class Lazy, defer, fix)
 import Control.Lazy.Lazy1 (class Lazy1)
@@ -201,3 +201,6 @@ accumB
   -> AnEvent future (a -> a)
   -> ABehaviour future time a
 accumB a = stepper a <<< accumE a
+
+time :: forall time future. Plus future => ABehaviour future time time
+time = Behaviour $ Step identity empty
