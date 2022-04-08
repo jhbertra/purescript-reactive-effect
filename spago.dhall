@@ -5,7 +5,10 @@
   [ "aff"
   , "arrays"
   , "bifunctors"
+  , "catenable-lists"
+  , "console"
   , "control"
+  , "datetime"
   , "debug"
   , "effect"
   , "either"
@@ -16,6 +19,7 @@
   , "foldable-traversable"
   , "gen"
   , "identity"
+  , "integers"
   , "lazy"
   , "lists"
   , "maybe"
@@ -38,6 +42,7 @@
   , "tuples"
   , "unfoldable"
   , "unlift"
+  , "unordered-collections"
   , "unsafe-coerce"
   ]
 , packages = ./packages.dhall

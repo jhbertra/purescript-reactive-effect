@@ -2,6 +2,7 @@ module Control.Reactive.Util where
 
 import Prelude
 
+import Data.Tuple.Nested (type (/\))
 import Effect (Effect)
 
 -- An action that registers a subscriber and returns an action used to cancel
@@ -15,3 +16,7 @@ type Subscriber' m a = a -> m Unit
 
 -- An effect that can cancel a pending operation.
 type Canceller = Effect Unit
+
+-- An action that creates a subscriber and a canceller.
+type Publish a = Publish' Effect a
+type Publish' m a = Effect (Subscriber' m a /\ Canceller)

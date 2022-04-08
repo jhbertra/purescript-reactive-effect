@@ -132,6 +132,17 @@ mfixTuple
   -> m (Tuple a b)
 mfixTuple = map unwrap <<< mfix <<< overM LazyTuple
 
+-- | A workaround for the missing Lazy instance for effects.
+-- | Abuses the fact that effects are represented as functions with no
+-- | arguments at runtime, and that Function does have a Lazy instance.
+mfixEffect
+  :: forall m a. MonadFix m => (Effect a -> m (Effect a)) -> m (Effect a)
+mfixEffect f = do
+  effAsFn <- mfix \(effAsFn :: Unit -> a) -> do
+    eff <- f $ unsafeCoerce effAsFn
+    pure $ unsafeCoerce eff
+  pure $ unsafeCoerce effAsFn
+
 mfixRecord
   :: forall m rl r
    . RowToList r rl
