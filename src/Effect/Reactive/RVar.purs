@@ -28,22 +28,21 @@ import Data.Bifunctor (lmap)
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (for_, sequence_, traverse_)
 import Data.FoldableWithIndex (forWithIndex_)
+import Data.HashMap (HashMap)
 import Data.HashMap as HM
 import Data.Int (round, toNumber)
 import Data.List (List(..), (:))
-import Data.Maybe (Maybe(..), fromMaybe, maybe)
+import Data.Maybe (Maybe(..), maybe)
 import Data.These (These(..))
-import Data.Traversable (for, sequence, traverse)
-import Data.TraversableWithIndex (forWithIndex)
+import Data.Traversable (sequence, traverse)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Class.Console as Console
-import Effect.Reactive (Raff, askTime, runLater, unsafeRunRaff)
-import Effect.Reactive.Types (Time(..), Timeline)
+import Effect.Reactive (Raff, askTime, runLater, runLater_, unsafeRunRaff)
+import Effect.Reactive.Types (Canceller, Time(..), Timeline)
 import Effect.Ref as Ref
 
-type Canceller = Effect Unit
 type Write (t :: Timeline) a = a -> Raff t Unit
 newtype BracketSubscriber' (t :: Timeline) a r = BracketSubscriber
   { start :: a -> Raff t r
@@ -335,34 +334,54 @@ instance Monoid a => Monoid (RVar t a) where
 
 data SubscriberRef' t a r
   = Idle (BracketSubscriber' t a r)
-  | Active (BracketSubscriber' t a r) r
+  | Active (BracketSubscriber' t a r) r (Time t)
 
 type SubscriberRef t a = Exists (SubscriberRef' t a)
 
-unsafeNew :: forall t a. (a -> a -> Boolean) -> Effect (RVarIO t a)
-unsafeNew equals = do
-  lastUpdateRef <- liftEffect $ Ref.new top
-  valueRef <- liftEffect $ Ref.new Nothing
-  nextSubscriberId <- liftEffect $ Ref.new 0
-  subscribersRef :: _ (_ _ (SubscriberRef t a)) <- liftEffect $ Ref.new HM.empty
-  lastSubscriberWrites <- liftEffect $ Ref.new HM.empty
+newWithEffect :: forall t a. (a -> a -> Boolean) -> Effect (RVarIO t a)
+newWithEffect equals = do
+  lastUpdateRef <- Ref.new top
+  valueRef <- Ref.new Nothing
+  nextSubscriberId <- Ref.new 0
+  subscribersRef :: _ (_ _ (SubscriberRef t a)) <- Ref.new HM.empty
+  writeLateActionCanceller <- Ref.new $ pure unit
   let
+
     rvar :: RVar t a
     rvar = RVar
-      { read: liftEffect $ Ref.read valueRef
-      , lastUpdate: liftEffect $ Ref.read lastUpdateRef
+      { read: readValue
+      , lastUpdate: readLastUpdate
       , subscribe: runExists \subscriber -> do
           sId <- addSubscriber $ mkExists (Idle subscriber)
-          runLater do
-            subscribers <- liftEffect $ Ref.read subscribersRef
-            for_ (HM.lookup sId subscribers) \sRef -> do
-              ma <- liftEffect $ Ref.read valueRef
-              for_ ma \a -> do
-                subscriber' <- startSubscriber a sId sRef
-                liftEffect
-                  $ Ref.modify_ (HM.insert sId subscriber') subscribersRef
+          runLater_ do
+            subscribers <- readSubscribers
+            ma <- readValue
+            for_ (Tuple <$> ma <*> HM.lookup sId subscribers) case _ of
+              Tuple a sRef -> startSubscriber a sId sRef
           pure $ removeSubscriber sId
       }
+
+    readLastUpdate :: Raff t (Time t)
+    readLastUpdate = liftEffect $ Ref.read lastUpdateRef
+
+    readValue :: Raff t (Maybe a)
+    readValue = liftEffect $ Ref.read valueRef
+
+    writeValue :: a -> Raff t (Time t)
+    writeValue a = do
+      time <- askTime
+      liftEffect do
+        Ref.write time lastUpdateRef
+        Ref.write (Just a) valueRef
+      pure time
+
+    clearValue :: Raff t Unit
+    clearValue = liftEffect do
+      Ref.write Nothing valueRef
+      Ref.write top lastUpdateRef
+
+    readSubscribers :: Raff t (HashMap Int (SubscriberRef t a))
+    readSubscribers = liftEffect $ Ref.read subscribersRef
 
     addSubscriber :: SubscriberRef t a -> Raff t Int
     addSubscriber subscriber = liftEffect do
@@ -378,71 +397,74 @@ unsafeNew equals = do
       case HM.lookup sId subscribers of
         Nothing -> pure unit
         Just subscriber -> do
+          stopSubscriber sId subscriber
           Ref.write (HM.delete sId subscribers) subscribersRef
-          void $ stopSubscriber subscriber
 
     shouldSkipWrite :: a -> Raff t Boolean
     shouldSkipWrite value = do
-      mCurrent <- liftEffect $ Ref.read valueRef
+      mCurrent <- readValue
       case mCurrent of
         Nothing -> pure true
         Just current -> pure $ equals value current
 
     write :: Write t a
     write a = unlessM (shouldSkipWrite a) do
-      time <- askTime
-      liftEffect do
-        Ref.write time lastUpdateRef
-        Ref.write (Just a) valueRef
-      runLater do
-        subscribers <- liftEffect $ Ref.read subscribersRef
-        forWithIndex_ subscribers \sId -> runExists case _ of
-          Active (BracketSubscriber { next }) r -> do
-            lastWrites <- liftEffect $ Ref.read lastSubscriberWrites
-            let lastWrite = fromMaybe bottom $ HM.lookup sId lastWrites
-            when (lastWrite < time) do
-              liftEffect $ Ref.modify_ (HM.insert sId time) lastSubscriberWrites
-              next r a
+      cancelWriteLateAction
+      time <- writeValue a
+      runLaterWrite do
+        unsetWriteLateAction
+        subscribers <- readSubscribers
+        for_ subscribers $ runExists case _ of
+          Active (BracketSubscriber { next }) r startTime ->
+            when (startTime < time) $ next r a
           _ -> pure unit
 
+    unsetWriteLateAction :: Raff t Unit
+    unsetWriteLateAction =
+      liftEffect $ Ref.write mempty writeLateActionCanceller
+
+    cancelWriteLateAction :: Raff t Unit
+    cancelWriteLateAction =
+      liftEffect $ join $ Ref.read writeLateActionCanceller
+
+    runLaterWrite :: Raff t Unit -> Raff t Unit
+    runLaterWrite =
+      liftEffect <<< flip Ref.write writeLateActionCanceller <=< runLater
+
     start :: Write t a
-    start a = liftEffect (Ref.read valueRef) >>= case _ of
+    start a = readValue >>= case _ of
       Just _ -> do
         Console.warn "Start called on already started RVar"
       Nothing -> do
-        time <- askTime
-        liftEffect do
-          Ref.write time lastUpdateRef
-          Ref.write (Just a) valueRef
-        runLater do
-          subscribers <- liftEffect $ Ref.read subscribersRef
-          subscribers' <- forWithIndex subscribers (startSubscriber a)
-          liftEffect $ Ref.write subscribers' subscribersRef
+        void $ writeValue a
+        runLater_ do
+          subscribers <- readSubscribers
+          forWithIndex_ subscribers (startSubscriber a)
 
     stop :: Raff t Unit
-    stop = liftEffect $ Ref.read valueRef >>= case _ of
+    stop = readValue >>= case _ of
       Just _ -> do
-        Ref.write Nothing valueRef
-        subscribers <- Ref.read subscribersRef
-        subscribers' <- for subscribers stopSubscriber
-        Ref.write subscribers' subscribersRef
-        Ref.write top lastUpdateRef
+        clearValue
+        subscribers <- readSubscribers
+        liftEffect $ forWithIndex_ subscribers stopSubscriber
       Nothing -> do
         Console.warn "Stop called on already stopped RVar"
 
+    startSubscriber :: a -> Int -> SubscriberRef t a -> Raff t Unit
     startSubscriber a sId = runExists case _ of
       Idle (BracketSubscriber s) -> do
         time <- askTime
-        liftEffect $ Ref.modify_ (HM.insert sId time) lastSubscriberWrites
         r <- s.start a
-        pure $ mkExists (Active (BracketSubscriber s) r)
-      s -> pure $ mkExists s
+        let sRef = mkExists (Active (BracketSubscriber s) r time)
+        liftEffect $ Ref.modify_ (HM.insert sId sRef) subscribersRef
+      _ -> mempty
 
-    stopSubscriber = runExists case _ of
-      Active s@(BracketSubscriber { done }) r -> do
+    stopSubscriber :: Int -> SubscriberRef t a -> Effect Unit
+    stopSubscriber sId = runExists case _ of
+      Active s@(BracketSubscriber { done }) r _ -> do
         done r
-        pure $ mkExists (Idle s)
-      s -> pure $ mkExists s
+        Ref.modify_ (HM.insert sId $ mkExists (Idle s)) subscribersRef
+      _ -> mempty
 
     control :: RVarControl t a
     control = { start, stop, write }
@@ -450,7 +472,7 @@ unsafeNew equals = do
   pure { control, rvar }
 
 newWith :: forall t a. (a -> a -> Boolean) -> Raff t (RVarIO t a)
-newWith = liftEffect <<< unsafeNew
+newWith = liftEffect <<< newWithEffect
 
 newEq :: forall t a. Eq a => Raff t (RVarIO t a)
 newEq = newWith eq

@@ -5,6 +5,7 @@ module Effect.Reactive
   , launchRaff_
   , runInAff
   , runLater
+  , runLater_
   , runRaff
   , runRaff_
   , unsafeRunRaff
@@ -16,21 +17,25 @@ import Control.Monad.Fix (class MonadFix)
 import Control.Monad.Reader
   ( class MonadAsk
   , class MonadReader
-  , ReaderT
+  , ReaderT(..)
   , ask
   , asks
   , local
   , runReaderT
   )
-import Control.Monad.Writer (class MonadTell, class MonadWriter, tell)
+import Control.Monad.Writer (class MonadTell, class MonadWriter)
+import Data.Array as Array
 import Data.CatList (CatList, null)
-import Data.Foldable (traverse_)
+import Data.FoldableWithIndex (foldMapWithIndex)
+import Data.HashSet (HashSet)
+import Data.HashSet as HS
+import Data.Monoid.Additive (Additive(..))
 import Data.Time.Duration (Milliseconds(..))
 import Data.Tuple (Tuple(..))
 import Effect (Effect, whileE)
 import Effect.Aff (Aff, Fiber, delay, launchAff, launchAff_)
 import Effect.Class (class MonadEffect, liftEffect)
-import Effect.Reactive.Types (Time, Timeline)
+import Effect.Reactive.Types (Canceller, Time, Timeline)
 import Effect.Ref (Ref)
 import Effect.Ref as Ref
 import Safe.Coerce (coerce)
@@ -71,8 +76,18 @@ unsafeRunRaff t (Raff r) = runRaffImpl t r
 runRaff_ :: forall a. (forall t. Raff t a) -> Effect Unit
 runRaff_ r = void (runRaff r)
 
-runLater :: forall t. Raff t Unit -> Raff t Unit
-runLater (Raff r) = Raff $ tell $ RaffW { lateActions: pure r }
+runLater :: forall t. Raff t Unit -> Raff t Canceller
+runLater (Raff r) = Raff $ Raff' $ ReaderT \(RaffEnv { state, writer }) -> do
+  let writer' = RaffW { lateActionCount: Additive 1, lateActions: pure r }
+  RaffW { lateActionCount } <- Ref.modify (_ <> writer') writer
+  let
+    index = coerce lateActionCount - 1
+    addCancelled (RaffS s) =
+      RaffS s { cancelledActions = HS.insert index s.cancelledActions }
+  pure $ Ref.modify_ addCancelled state
+
+runLater_ :: forall t. Raff t Unit -> Raff t Unit
+runLater_ = void <<< runLater
 
 askTime :: forall t. Raff t (Time t)
 askTime = Raff $ asks case _ of RaffR { time } -> time
@@ -116,6 +131,7 @@ instance MonadWriter (RaffW t) (Raff' t) where
 newtype RaffEnv (t :: Timeline) = RaffEnv
   { reader :: RaffR t
   , writer :: Ref (RaffW t)
+  , state :: Ref RaffS
   }
 
 newtype RaffR (t :: Timeline) = RaffR
@@ -124,6 +140,11 @@ newtype RaffR (t :: Timeline) = RaffR
 
 newtype RaffW (t :: Timeline) = RaffW
   { lateActions :: CatList (Raff' t Unit)
+  , lateActionCount :: Additive Int
+  }
+
+newtype RaffS = RaffS
+  { cancelledActions :: HashSet Int
   }
 
 instance Semigroup (RaffW t) where
@@ -134,16 +155,25 @@ instance Monoid (RaffW t) where
 
 runRaffImpl :: forall t a. Time t -> Raff' t a -> Effect a
 runRaffImpl time (Raff' r) = do
-  writer <- Ref.new $ RaffW { lateActions: mempty }
+  writer <- Ref.new $ RaffW mempty
+  state <- Ref.new $ RaffS mempty
   let reader = RaffR { time }
-  let env = RaffEnv { reader, writer }
+  let env = RaffEnv { reader, writer, state }
   a <- runReaderT r env
   flip whileE (pure unit) do
+    RaffS { cancelledActions } <- Ref.read state
     RaffW { lateActions } <- Ref.read writer
     if null lateActions then
       pure false
     else do
-      Ref.write (RaffW { lateActions: mempty }) writer
-      runReaderT (traverse_ (coerce :: _ -> _ _ _ Unit) lateActions) env
+      Ref.write (RaffW mempty) writer
+      Ref.write (RaffS mempty) state
+      let
+        runIfNotCancelled i (Raff' action)
+          | HS.member i cancelledActions = pure unit
+          | otherwise = action
+      runReaderT
+        (foldMapWithIndex runIfNotCancelled $ Array.fromFoldable $ lateActions)
+        env
       pure true
   pure a

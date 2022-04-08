@@ -2,6 +2,8 @@ module Effect.Reactive.Types where
 
 import Prelude
 
+import Effect (Effect)
+
 foreign import data Timeline :: Type
 
 newtype Time (t :: Timeline) = Time Number
@@ -15,3 +17,5 @@ instance Semigroup (Time t) where
 
 instance Monoid (Time t) where
   mempty = Time bottom
+
+type Canceller = Effect Unit
