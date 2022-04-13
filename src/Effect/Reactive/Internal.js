@@ -152,10 +152,25 @@ function OutputNode(id, fire) {
   return self;
 }
 
+function LatchNode(id, initialValue, fire) {
+  const self = Node(id, fire);
+  let value = initialValue;
+  self.write = function LatchNode_write(x) {
+    return (value = x);
+  };
+  self.read = function LatchNode_read() {
+    return value;
+  };
+  self.addOutput(self.id);
+  return self;
+}
+
 function Network(scheduler) {
   const self = new EventTarget();
   let nextNodeId = 0;
-  const raisedInputs = new Map();
+  const latchWrites = new Map();
+  const nodeValues = new Map();
+  const raisedNodes = new Map();
   const raisedOutputs = new Map();
 
   self.status = NETWORK_OFFLINE;
@@ -164,11 +179,34 @@ function Network(scheduler) {
     debug("Network.evaluate");
     if (self.status === NETWORK_OFFLINE) return;
     self.status = NETWORK_EVALUATING;
-    traverse(raisedInputs.values(), function ({ value, input }) {
-      input.traverseChildren((c) => c.fire(value));
-    });
-    raisedInputs.clear();
+    while (raisedNodes.size > 0) {
+      const nodesArray = Array.from(raisedNodes.values(), function (item) {
+        if (nodeValues.has(item.node.id)) {
+          console.error(
+            "Cycle detected in network. Node has been visited multiple times.",
+            item.node
+          );
+          throw new Error(
+            "Cycle detected in network. Node has been visited multiple times."
+          );
+        }
+        nodeValues.set(item.node.id, item.value);
+        return item;
+      });
+      raisedNodes.clear();
+      nodesArray.forEach(function Network_evaluate_propagate({ value, node }) {
+        node.traverseChildren((c) => c.fire(value));
+      });
+    }
     if (self.status === NETWORK_OFFLINE) return;
+    nodeValues.clear();
+    traverse(
+      latchWrites.values(),
+      function Network_evaluate_writeLatch({ value, latch }) {
+        latch.write(value);
+      }
+    );
+    latchWrites.clear();
     self.status = NETWORK_EMITTING;
     traverse(raisedOutputs.values(), function ({ value, sink }) {
       sink(value);
@@ -198,18 +236,18 @@ function Network(scheduler) {
   self.newInput = function Network_newInput() {
     debug("Network.newInput");
     return newNode(function Network_newInput_makeNode(id) {
-      return InputNode(id, function Network_newInput_fire(value, input) {
+      return InputNode(id, function Network_newInput_fire(value, node) {
         switch (self.status) {
           case NETWORK_STANDBY:
-            raisedInputs.set(id, { value, input });
+            raisedNodes.set(id, { value, node });
             scheduler.schedule(evaluate);
             break;
           case NETWORK_SCHEDULED:
-            raisedInputs.set(id, { value, input });
+            raisedNodes.set(id, { value, node });
             break;
           case NETWORK_EVALUATING:
           case NETWORK_EMITTING:
-            scheduler.schedule(() => input.fire(value));
+            scheduler.schedule(() => node.fire(value));
             break;
         }
       });
@@ -219,13 +257,31 @@ function Network(scheduler) {
   self.newOutput = function Network_newOutput(sink) {
     debug("Network.newOutput");
     return newNode(function Network_newOutput_makeNode(id) {
-      return OutputNode(id, function Network_newOutput_fire(value, output) {
+      return OutputNode(id, function Network_newOutput_fire(value) {
         switch (self.status) {
           case NETWORK_EVALUATING:
             raisedOutputs.set(id, { value, sink });
             break;
         }
       });
+    });
+  };
+
+  self.newLatch = function Network_newLatch(initialValue) {
+    debug("Network.newLatch");
+    return newNode(function Network_newLatch_makeNode(id) {
+      return LatchNode(
+        id,
+        initialValue,
+        function Network_newLatch_fire(value, node) {
+          switch (self.status) {
+            case NETWORK_EVALUATING:
+              raisedNodes.set(id, { value, node });
+              latchWrites.set(id, { value, latch: node });
+              break;
+          }
+        }
+      );
     });
   };
 
@@ -240,7 +296,7 @@ function Network(scheduler) {
     if (self.status !== NETWORK_OFFLINE) {
       self.status = NETWORK_OFFLINE;
       self.dispatchEvent(new Event("deactivated"));
-      raisedInputs.clear();
+      raisedNodes.clear();
       raisedOutputs.clear();
     }
   };
@@ -254,7 +310,7 @@ function Network(scheduler) {
       case NETWORK_SCHEDULED:
         self.status = NETWORK_SUSPENDED;
         self.dispatchEvent(new Event("suspended"));
-        raisedInputs.clear();
+        raisedNodes.clear();
         raisedOutputs.clear();
         break;
       default:
