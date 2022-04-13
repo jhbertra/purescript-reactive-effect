@@ -3,341 +3,272 @@
 const debugMode =
   localStorage.getItem("Effect.Reactive.Internal.debugMode") === "true";
 
-const NODE_PULSE = debugMode ? "NODE_PULSE" : 0;
-
-const NETWORK_UNMOUNTED = debugMode ? "NETWORK_UNMOUNTED" : 0;
-const NETWORK_OFFLINE = debugMode ? "NETWORK_OFFLINE" : 1;
-const NETWORK_STANDBY = debugMode ? "NETWORK_STANDBY" : 2;
-const NETWORK_PENDING_EVALUATION = debugMode ? "NETWORK_PENDING_EVALUATION" : 3;
-const NETWORK_EVALUATING = debugMode ? "NETWORK_EVALUATING" : 4;
-
-const GRAPH_UNMOUNTED = debugMode ? "GRAPH_UNMOUNTED" : 0;
-const GRAPH_DISCONNECTED = debugMode ? "GRAPH_DISCONNECTED" : 1;
-const GRAPH_CONNECTED = debugMode ? "GRAPH_CONNECTED" : 2;
+const NETWORK_OFFLINE = debugMode ? "OFFLINE" : 0;
+const NETWORK_STANDBY = debugMode ? "STANDBY" : 1;
+const NETWORK_SCHEDULED = debugMode ? "SCHEDULED" : 2;
+const NETWORK_EVALUATING = debugMode ? "EVALUATING" : 3;
+const NETWORK_EMITTING = debugMode ? "EMITTING" : 4;
+const NETWORK_SUSPENDED = debugMode ? "SUSPENDED" : 5;
 
 const debug = debugMode ? console.debug : () => {};
 const log = debugMode ? console.log : () => {};
 const warn = debugMode ? console.warn : () => {};
 
-function SyncScheduler() {
+function TimeoutScheduler() {
   return {
-    schedule: function syncSchedulerSchedule(task) {
-      task();
+    schedule: function timeoutSchedulerSchedule(task) {
+      setTimeout(task, 0);
     },
   };
 }
 
-function Pulse(id, onMount) {
-  debug("Pulse", id, onMount);
-  const pulse = { tag: NODE_PULSE, id };
-  let handlers = null;
-  let onDisconnect = null;
-  pulse.mount = function pulseMount() {
-    if (handlers) return;
-    debug("Pulse.mount", pulse);
-    handlers = onMount(pulse);
-  };
-  pulse.connect = function pulseConnect() {
-    if (!handlers || !handlers.onConnect || onDisconnect) return;
-    debug("Pulse.connect", pulse);
-    onDisconnect = handlers.onConnect(pulse);
-  };
-  pulse.disconnect = function () {
-    if (!onDisconnect) return;
-    debug("Pulse.disconnect", pulse);
-    onDisconnect(pulse);
-    onDisconnect = null;
-  };
-  pulse.unmount = function () {
-    if (!handlers || !handlers.onUnmount || onDisconnect) return;
-    debug("Pulse.unmount", pulse);
-    handlers.onUnmount(pulse);
-  };
-  pulse.dump = function () {
-    return { handlers, onDisconnect };
-  };
-  return pulse;
+function traverse(iterator, f) {
+  let iteration = iterator.next();
+  while (!iteration.done) {
+    f(iteration.value);
+    iteration = iterator.next();
+  }
 }
 
-function Graph() {
-  const roots = new Set();
-  const nodes = new Map();
-  let nextNodeId = 0;
-  let status = GRAPH_UNMOUNTED;
-  return {
-    newRootPulse: function graphNewPulse(onMount) {
-      const ctx = "Graph.newRootPulse";
-      debug(ctx, onMount);
-      const pulse = Pulse(nextNodeId++, function graphNewPulseOnMount(pulse) {
-        const ctx = "Graph.newRootPulse.onMount";
-        debug(ctx, pulse);
-        const handlers = onMount(pulse);
-        return {
-          onConnect: handlers.onConnect,
-          onUnmount: function graphNewPulseOnUnmount(pulse) {
-            const ctx = "Graph.newRootPulse.onUnmount";
-            debug(ctx, pulse);
-            handlers.onUnmount();
-            nodes.delete(pulse.id);
-            debug(ctx, "removed pulse from nodes", pulse, nodes);
-            roots.delete(pulse.id);
-            debug(ctx, "removed pulse from roots", pulse, roots);
-          },
-        };
-      });
-      nodes.set(pulse.id, pulse);
-      debug(ctx, "added pulse to nodes", pulse, nodes);
-      roots.add(pulse.id);
-      debug(ctx, "added pulse to roots", pulse, roots);
-      switch (status) {
-        case GRAPH_UNMOUNTED:
-          break;
-        default:
-          pulse.mount();
-      }
-    },
-    mount: function graphMount() {
-      if (status !== GRAPH_UNMOUNTED) return;
-      debug("Graph.mount");
-      for (const entry of nodes) {
-        const node = entry[1];
-        node.mount();
-      }
-      status = GRAPH_DISCONNECTED;
-    },
-    connect: function graphConnect() {
-      if (status !== GRAPH_DISCONNECTED) return;
-      debug("Graph.connect");
-      for (const entry of nodes) {
-        const node = entry[1];
-        node.connect();
-      }
-      status = GRAPH_CONNECTED;
-    },
-    disconnect: function graphDisconnect() {
-      if (status !== GRAPH_CONNECTED) return;
-      debug("Graph.disconnect");
-      for (const entry of nodes) {
-        const node = entry[1];
-        node.disconnect();
-      }
-      status = GRAPH_DISCONNECTED;
-    },
-    unmount: function graphUnmount() {
-      if (status !== GRAPH_DISCONNECTED) return;
-      debug("Graph.unmount");
-      for (const entry of nodes) {
-        const node = entry[1];
-        node.unmount();
-      }
-      status = GRAPH_UNMOUNTED;
-    },
-    dump: function graphDump() {
-      return { roots, nodes, nextNodeId, status };
-    },
-  };
-}
+function Node(id, fire) {
+  const self = new EventTarget();
 
-function NetworkOutput(id, graph, connect, sink) {
-  debug("NetworkOutput", id, graph, connect, raise);
-  const output = { id };
-  let connected = false;
-  const pulse = graph.newLeafPulse(function networkOutputConnect(pulse) {
-    if (connected) return () => {};
-    connected = true;
-    debug("NetworkOutput.connect", output, pulse);
-    const disconnect = connect(output, pulse);
-    return function networkOutputDisconnect() {
-      if (connected) {
-        debug("NetworkOutput.disconnect", output, pulse);
-        disconnect();
-        connected = false;
+  self.id = id;
+  self.outputs = new Map();
+  self.inputs = new Map();
+  self.parents = new Map();
+  self.children = new Map();
+
+  self.traverseChildren = function Node_traverseChildren(f) {
+    traverse(self.children.values(), f);
+  };
+
+  self.traverseParents = function Node_traverseParents(f) {
+    traverse(self.parents.values(), f);
+  };
+
+  function isConnected() {
+    return self.inputs.size > 0 && self.outputs.size > 0;
+  }
+
+  function updateIO(f) {
+    const connectedBefore = isConnected();
+    f();
+    const connectedAfter = isConnected();
+    if (!connectedBefore && connectedAfter) {
+      self.dispatchEvent(new Event("connected"));
+    } else if (connectedBefore && !connectedAfter) {
+      self.dispatchEvent(new Event("disconnected"));
+    }
+  }
+
+  self.addInput = function Node_addInput(input) {
+    updateIO(function () {
+      const count = self.inputs.get(input) || 0;
+      self.inputs.set(input, count + 1);
+      self.traverseChildren((c) => c.addInput(input));
+    });
+  };
+
+  self.addOutput = function Node_addOutput(output) {
+    updateIO(function () {
+      const count = self.outputs.get(output) || 0;
+      self.outputs.set(output, count + 1);
+      self.traverseParents((p) => p.addInput(output));
+    });
+  };
+
+  self.removeInput = function Node_removeInput(id) {
+    updateIO(function () {
+      const count = self.inputs.get(id);
+      if (count) {
+        const newCount = count - 1;
+        if (newCount) {
+          self.inputs.set(id, count + 1);
+        } else {
+          self.inputs.delete(id);
+        }
+        self.traverseChildren((c) => c.removeInput(id));
       }
-    };
-  });
-  output.sink = function (a) {
-    if (connected) {
-      debug("NetworkOutput.sink", output, a);
-      sink(output, a);
+    });
+  };
+
+  self.removeOutput = function Node_removeOutput(id) {
+    updateIO(function () {
+      const count = self.outputs.get(id);
+      if (count) {
+        const newCount = count - 1;
+        if (newCount) {
+          self.outputs.set(id, count + 1);
+        } else {
+          self.outputs.delete(id);
+        }
+        self.traverseParents((p) => p.removeOutput(id));
+      }
+    });
+  };
+
+  self.addParent = function Node_addParent(parent) {
+    self.parents.set(parent.id, parent);
+    parent.addChild(self);
+  };
+
+  self.removeParent = function Node_removeParent(parent) {
+    self.parents.delete(parent.id);
+    parent.removeChild(self);
+  };
+
+  self.addChild = function Node_addChild(child) {
+    self.children.set(child.id, child);
+    traverse(child.outputs.keys(), self.addOutput);
+    traverse(self.inputs.keys(), child.addInput);
+  };
+
+  self.removeChild = function Node_removeChild(child) {
+    self.children.delete(child.id);
+    traverse(child.outputs.keys(), self.removeOutput);
+    traverse(self.inputs.keys(), child.removeInput);
+  };
+
+  self.fire = function Node_fire(value) {
+    if (self.outputs.size > 0 && self.inputs.size > 0) {
+      debug("Node.fire", id, value);
+      fire(value, self);
     }
   };
-  return output;
+
+  return self;
 }
 
-function Network(scheduler, graph) {
-  let status = NETWORK_UNMOUNTED;
-  let nextInputId = 0;
-  let nextOutputId = 0;
-  const inputs = new Map();
-  const pendingInputs = [];
-  const inputsRaised = new Map();
-  const outputs = new Map();
-  const evaluators = new Map();
+function InputNode(id, fire) {
+  const self = Node(id, fire);
+  self.addInput(self.id);
+  return self;
+}
+
+function OutputNode(id, fire) {
+  const self = Node(id, fire);
+  self.addOutput(self.id);
+  return self;
+}
+
+function Network(scheduler) {
+  const self = new EventTarget();
+  let nextNodeId = 0;
+  const raisedInputs = new Map();
+  const raisedOutputs = new Map();
+
+  self.status = NETWORK_OFFLINE;
 
   function evaluate() {
     debug("Network.evaluate");
-    status = NETWORK_EVALUATING;
-    debug("Network.evaluate", "status set to", status);
-    debug("Network.evaluate", "processing raised inputs", inputsRaised);
-    // TODO
-    inputsRaised.clear();
-    debug("Network.evaluate", "inputsRaised cleared", inputsRaised);
-    status = NETWORK_STANDBY;
-    debug("Network.evaluate", "status set to", status);
+    if (self.status === NETWORK_OFFLINE) return;
+    self.status = NETWORK_EVALUATING;
+    traverse(raisedInputs.values(), function ({ value, input }) {
+      input.traverseChildren((c) => c.fire(value));
+    });
+    raisedInputs.clear();
+    if (self.status === NETWORK_OFFLINE) return;
+    self.status = NETWORK_EMITTING;
+    traverse(raisedOutputs.values(), function ({ value, sink }) {
+      sink(value);
+    });
+    raisedOutputs.clear();
+    self.status = NETWORK_STANDBY;
   }
 
-  return {
-    getStatus: function () {
-      return status;
-    },
+  function newNode(makeNode) {
+    debug("Network.newNode");
+    const id = nextNodeId++;
+    const node = makeNode(id);
+    const superFire = node.fire;
+    node.fire = function Network_newNode_fire(value) {
+      switch (self.status) {
+        case NETWORK_OFFLINE:
+        case NETWORK_SUSPENDED:
+          break;
+        default:
+          superFire(value);
+          break;
+      }
+    };
+    return node;
+  }
 
-    newInput: function newInput(onMount) {
-      debug("Network.newInput", onMount);
-      const id = nextInputId++;
-      let connected = false;
-      graph.newRootPulse(function networkInputOnMount(pulse) {
-        const ctx = "Network.newInput.onMount";
-        debug(ctx, id, pulse);
-        inputs.set(id, pulse);
-        debug(ctx, "added input to inputs", id, pulse, inputs);
-        const handlers = onMount(pulse);
-        return {
-          onConnect: function networkNewInputOnConnect(pulse) {
-            const ctx = "Network.newInput.onConnect";
-            debug(ctx, id, pulse);
-            connected = true;
-            const onDisconnect = handlers.onConnect(pulse);
-            return function networkNewInputOnDisconnect(pulse) {
-              const ctx = "Network.newInput.onDisconnect";
-              debug(ctx, id, pulse);
-              connected = false;
-              onDisconnect(pulse);
-            };
-          },
-          onUnmount: function networkNewInputOnUnmount(pulse) {
-            const ctx = "Network.newInput.onUnmount";
-            debug(ctx, id, pulse);
-            handlers.onUnmount(pulse);
-            inputs.delete(id);
-            debug(ctx, "removed input from inputs", id, pulse, inputs);
-          },
-        };
+  self.newInput = function Network_newInput() {
+    debug("Network.newInput");
+    return newNode(function Network_newInput_makeNode(id) {
+      return InputNode(id, function Network_newInput_fire(value, input) {
+        switch (self.status) {
+          case NETWORK_STANDBY:
+            raisedInputs.set(id, { value, input });
+            scheduler.schedule(evaluate);
+            break;
+          case NETWORK_SCHEDULED:
+            raisedInputs.set(id, { value, input });
+            break;
+          case NETWORK_EVALUATING:
+          case NETWORK_EMITTING:
+            scheduler.schedule(() => input.fire(value));
+            break;
+        }
       });
-
-      function raise(a) {
-        if (!connected) return;
-        const ctx = "Network.newInput.raise";
-        debug(ctx, id, a);
-        if (status === NETWORK_OFFLINE) return;
-        if (status === NETWORK_EVALUATING) {
-          debug(ctx, "scheduling raise");
-          scheduler.schedule(function () {
-            raise(a);
-          });
-        } else {
-          inputsRaised.set(id, a);
-        }
-        if (status === NETWORK_STANDBY) {
-          debug(ctx, "scheduling evaluation");
-          status = NETWORK_PENDING_EVALUATION;
-          scheduler.schedule(evaluate);
-        }
-      }
-
-      return raise;
-    },
-
-    mount: function networkMount() {
-      debug("Network.mount");
-      switch (status) {
-        case NETWORK_UNMOUNTED:
-          debug("mounting network");
-          status = NETWORK_OFFLINE;
-          graph.mount();
-          break;
-        default:
-          warn(
-            "***Effect.Reactive.Internal:",
-            "mount called on an already mounted Network"
-          );
-          break;
-      }
-    },
-
-    actuate: function () {
-      debug("Network.actuate");
-      switch (status) {
-        case NETWORK_OFFLINE:
-          debug("actuating network");
-          status = NETWORK_STANDBY;
-          graph.connect();
-          break;
-        case NETWORK_UNMOUNTED:
-          warn(
-            "***Effect.Reactive.Internal:",
-            "actuate called without first calling mount"
-          );
-          break;
-        default:
-          warn(
-            "***Effect.Reactive.Internal:",
-            "actuate called on an already running Network"
-          );
-          break;
-      }
-    },
-
-    deactivate: function () {
-      debug("Network.deactivate");
-      switch (status) {
-        case NETWORK_UNMOUNTED:
-        case NETWORK_OFFLINE:
-          warn(
-            "***Effect.Reactive.Internal:",
-            "deactivate called on an already offline Network"
-          );
-          break;
-        default:
-          debug("deactivating network");
-          graph.disconnect();
-          status = NETWORK_OFFLINE;
-          break;
-      }
-    },
-
-    unmount: function networkUnmount() {
-      debug("Network.unmount");
-      switch (status) {
-        case NETWORK_OFFLINE:
-          debug("unmounting network");
-          status = NETWORK_UNMOUNTED;
-          graph.unmount();
-          break;
-        default:
-          warn(
-            "***Effect.Reactive.Internal:",
-            "mount called from inappropriate status",
-            status
-          );
-          break;
-      }
-    },
-
-    dump: function networkDump() {
-      return {
-        status,
-        nextInputId,
-        nextOutputId,
-        inputs,
-        inputsRaised,
-        outputs,
-        pendingInputs,
-        evaluators,
-      };
-    },
+    });
   };
-}
 
-// function Raff(scheduler, network) {
-//   return {};
-// }
+  self.newOutput = function Network_newOutput(sink) {
+    debug("Network.newOutput");
+    return newNode(function Network_newOutput_makeNode(id) {
+      return OutputNode(id, function Network_newOutput_fire(value, output) {
+        switch (self.status) {
+          case NETWORK_EVALUATING:
+            raisedOutputs.set(id, { value, sink });
+            break;
+        }
+      });
+    });
+  };
+
+  self.actuate = function Network_actuate() {
+    if (self.status === NETWORK_OFFLINE) {
+      self.status = NETWORK_STANDBY;
+      self.dispatchEvent(new Event("actuated"));
+    }
+  };
+
+  self.deactivate = function Network_deactivate() {
+    if (self.status !== NETWORK_OFFLINE) {
+      self.status = NETWORK_OFFLINE;
+      self.dispatchEvent(new Event("deactivated"));
+      raisedInputs.clear();
+      raisedOutputs.clear();
+    }
+  };
+
+  self.suspend = function Network_suspend() {
+    switch (self.status) {
+      case NETWORK_OFFLINE:
+      case NETWORK_SUSPENDED:
+        break;
+      case NETWORK_STANDBY:
+      case NETWORK_SCHEDULED:
+        self.status = NETWORK_SUSPENDED;
+        self.dispatchEvent(new Event("suspended"));
+        raisedInputs.clear();
+        raisedOutputs.clear();
+        break;
+      default:
+        scheduler.schedule(self.suspend);
+        break;
+    }
+  };
+
+  self.resume = function Network_resume() {
+    if (self.status === NETWORK_SUSPENDED) {
+      self.status = NETWORK_STANDBY;
+      self.dispatchEvent(new Event("resumed"));
+    }
+  };
+
+  return self;
+}
