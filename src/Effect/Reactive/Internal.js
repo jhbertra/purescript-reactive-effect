@@ -14,10 +14,10 @@ const debug = debugMode ? console.debug : () => {};
 const log = debugMode ? console.log : () => {};
 const warn = debugMode ? console.warn : () => {};
 
-function TimeoutScheduler() {
+function AnimationFrameScheduler() {
   return {
     schedule: function timeoutSchedulerSchedule(task) {
-      setTimeout(task, 0);
+      requestAnimationFrame(task);
     },
   };
 }
@@ -74,7 +74,7 @@ function Node(id, fire) {
     updateIO(function () {
       const count = self.outputs.get(output) || 0;
       self.outputs.set(output, count + 1);
-      self.traverseParents((p) => p.addInput(output));
+      self.traverseParents((p) => p.addOutput(output));
     });
   };
 
@@ -109,6 +109,7 @@ function Node(id, fire) {
   };
 
   self.addParent = function Node_addParent(parent) {
+    if (self.parents.has(parent.id)) return;
     self.parents.set(parent.id, parent);
     parent.addChild(self);
   };
@@ -119,7 +120,9 @@ function Node(id, fire) {
   };
 
   self.addChild = function Node_addChild(child) {
+    if (self.children.has(child.id)) return;
     self.children.set(child.id, child);
+    child.addParent(self);
     traverse(child.outputs.keys(), self.addOutput);
     traverse(self.inputs.keys(), child.addInput);
   };
@@ -282,6 +285,21 @@ function Network(scheduler) {
           }
         }
       );
+    });
+  };
+
+  self.newNode = function Network_newNode(evalNode) {
+    debug("Network.newNode");
+    return newNode(function Network_newNode_makeNode(id) {
+      return Node(id, function Network_newNode_fire(value, node) {
+        switch (self.status) {
+          case NETWORK_EVALUATING:
+            evalNode(value, node, function Network_newNode_raise(newValue) {
+              raisedNodes.set(id, { value: newValue, node });
+            });
+            break;
+        }
+      });
     });
   };
 
