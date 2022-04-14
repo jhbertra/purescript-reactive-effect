@@ -2,9 +2,12 @@ module Effect.Reactive.Internal
   ( class IsNode
   , class HasChildren
   , class HasParents
+  , class InputRow
+  , class OutputRow
   , Scheduler
   , Node
-  , NodeEval
+  , EvalProcess
+  , MultiNode
   , InputNode
   , ProcessNode
   , OutputNode
@@ -25,7 +28,8 @@ module Effect.Reactive.Internal
   , newInput
   , newOutput
   , newLatch
-  , newNode
+  , newProcess
+  , newMulti
   , actuate
   , deactivate
   , resume
@@ -52,14 +56,25 @@ import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (Error)
 import Effect.Reactive.Types (Timeline)
-import Effect.Uncurried (EffectFn1, EffectFn2, runEffectFn2)
+import Effect.Uncurried
+  ( EffectFn1
+  , EffectFn2
+  , EffectFn4
+  , runEffectFn2
+  , runEffectFn4
+  )
 import Effect.Unlift (class MonadUnliftEffect)
+import Prim.Row as Row
+import Prim.RowList (class RowToList, RowList)
+import Prim.RowList as RL
 import Safe.Coerce (coerce)
 import Unsafe.Coerce (unsafeCoerce)
 
 foreign import data Network :: Timeline -> Type
 
 foreign import data Node :: Timeline -> Type -> Type -> Type
+
+foreign import data MultiNode :: Timeline -> Row Type -> Row Type -> Type
 
 foreign import data ProcessNode :: Timeline -> Type -> Type -> Type
 
@@ -68,6 +83,12 @@ foreign import data InputNode :: Timeline -> Type -> Type
 foreign import data OutputNode :: Timeline -> Type -> Type
 
 foreign import data LatchNode :: Timeline -> Type -> Type
+
+type EvalProcess t a b =
+  ProcessNode t a b -> a -> (b -> Raff t Unit) -> Raff t Unit
+
+type EvalMulti t ri riRead ro roWrite =
+  MultiNode t ri ro -> { | riRead } -> { | roWrite } -> Raff t Unit
 
 class IsNode t a b n | n -> t a b where
   toNode :: n -> Node t a b
@@ -90,7 +111,10 @@ instance IsNode t a b (ProcessNode t a b) where
 foreign import data Scheduler :: Type
 
 foreign import _withNetwork
-  :: forall r. EffectFn2 Scheduler (forall t. Network t -> Effect r) r
+  :: forall r
+   . EffectFn4 (forall a. a -> Maybe a) (forall a. Maybe a) Scheduler
+       (forall t. Network t -> Effect r)
+       r
 
 foreign import timeoutScheduler :: Scheduler
 
@@ -100,7 +124,7 @@ foreign import schedule :: Scheduler -> EffectFn1 (Effect Unit) Unit
 
 withNetwork
   :: forall r. Scheduler -> (forall t. Network t -> Effect r) -> Effect r
-withNetwork = runEffectFn2 _withNetwork
+withNetwork = runEffectFn4 _withNetwork Just Nothing
 
 newtype Raff t a = Raff (ReaderT (Network t) Effect a)
 
@@ -185,24 +209,61 @@ onConnected
   :: forall t a b. Node t a b -> Effect (Effect Unit) -> Effect (Effect Unit)
 onConnected = runEffectFn2 _onConnected
 
-type NodeEval t a b =
-  ProcessNode t a b -> a -> (b -> Raff t Unit) -> Raff t Unit
-
 foreign import newInput :: forall t a. Raff t (InputNode t a)
 foreign import newOutput
   :: forall t a. (a -> Effect Unit) -> Raff t (OutputNode t a)
 
 foreign import newLatch :: forall t a. a -> Raff t (LatchNode t a)
-foreign import newNode
-  :: forall t a b. NodeEval t a b -> Raff t (ProcessNode t a b)
+foreign import newProcess
+  :: forall t a b. EvalProcess t a b -> Raff t (ProcessNode t a b)
+
+foreign import _newMulti
+  :: forall t ri riRead ro roWrite
+   . Fn3 { | ri } { | ro } (EvalMulti t ri riRead ro roWrite)
+       (Raff t (MultiNode t ri ro))
 
 foreign import actuate :: forall t. Raff t Unit
 foreign import deactivate :: forall t. Raff t Unit
 foreign import resume :: forall t. Raff t Unit
 foreign import suspend :: forall t. Raff t Unit
 foreign import readLatch :: forall t a. LatchNode t a -> Raff t a
-foreign import _readNode
-  :: forall t a b. Fn3 (a -> Maybe a) (Maybe a) (Node t a b) (Raff t (Maybe b))
+foreign import readNode :: forall t a b. Node t a b -> Raff t (Maybe b)
 
-readNode :: forall t a b. Node t a b -> Raff t (Maybe b)
-readNode = runFn3 _readNode Just Nothing
+newMulti
+  :: forall t rli ri riRead rlo ro roWrite
+   . RowToList ri rli
+  => RowToList ro rlo
+  => InputRow t ri riRead rli
+  => OutputRow t ro roWrite rlo
+  => { | ri }
+  -> { | ro }
+  -> EvalMulti t ri riRead ro roWrite
+  -> Raff t (MultiNode t ri ro)
+newMulti = runFn3 _newMulti
+
+class InputRow :: Timeline -> Row Type -> Row Type -> RowList Type -> Constraint
+class InputRow t r rRead rl | rl -> r rRead t
+
+instance InputRow t () () RL.Nil
+
+instance
+  ( HasChildren t x y node
+  , Row.Cons label node r' r
+  , Row.Cons label (Raff t (Maybe y)) rRead' rRead
+  , InputRow t r' rRead' rl
+  ) =>
+  InputRow t r rRead (RL.Cons label node rl)
+
+class OutputRow
+  :: Timeline -> Row Type -> Row Type -> RowList Type -> Constraint
+class OutputRow t r rWrite rl | rl -> r rWrite t
+
+instance OutputRow t () () RL.Nil
+
+instance
+  ( HasParents t x y node
+  , Row.Cons label node r' r
+  , Row.Cons label (x -> Raff t Unit) rWrite' rWrite
+  , OutputRow t r' rWrite' rl
+  ) =>
+  OutputRow t r rWrite (RL.Cons label node rl)

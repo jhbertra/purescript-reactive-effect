@@ -40,6 +40,7 @@ function traverse(iterator, f) {
 }
 
 function Node(id, fire) {
+  debug("Node", id);
   const self = new EventTarget();
 
   self.id = id;
@@ -72,6 +73,7 @@ function Node(id, fire) {
   }
 
   self.addInput = function Node_addInput(input) {
+    debug("Node.addInput", self.id, input);
     updateIO(function () {
       const count = self.inputs.get(input) || 0;
       self.inputs.set(input, count + 1);
@@ -80,6 +82,7 @@ function Node(id, fire) {
   };
 
   self.addOutput = function Node_addOutput(output) {
+    debug("Node.addOutput", self.id, output);
     updateIO(function () {
       const count = self.outputs.get(output) || 0;
       self.outputs.set(output, count + 1);
@@ -119,6 +122,7 @@ function Node(id, fire) {
 
   self.addParent = function Node_addParent(parent) {
     if (self.parents.has(parent.id)) return;
+    debug("Node.addParent", self.id, parent.id);
     self.parents.set(parent.id, parent);
     parent.addChild(self);
   };
@@ -129,8 +133,8 @@ function Node(id, fire) {
   };
 
   self.addChild = function Node_addChild(child) {
-    debug("Node.addChild", self.id, child.id);
     if (self.children.has(child.id)) return;
+    debug("Node.addChild", self.id, child.id);
     self.children.set(child.id, child);
     child.addParent(self);
     traverse(child.outputs.keys(), self.addOutput);
@@ -144,8 +148,8 @@ function Node(id, fire) {
   };
 
   self.fire = function Node_fire(value) {
+    debug("Node.fire", id, value, self.outputs, self.inputs);
     if (self.outputs.size > 0 && self.inputs.size > 0) {
-      debug("Node.fire", id, value);
       fire(value, self);
     }
   };
@@ -174,57 +178,97 @@ function LatchNode(id, initialValue, fire) {
   self.read = function LatchNode_read() {
     return value;
   };
-  self.addOutput(self.id);
   return self;
 }
 
-function Network(scheduler) {
+function MultiNode(id, inputs, outputs, fire) {
+  const self = Node(id, fire);
+  Object.values(inputs).forEach(self.addParent);
+  Object.values(outputs).forEach(self.addChild);
+  return self;
+}
+
+function Network(Just, Nothing, scheduler) {
   const self = new EventTarget();
   let nextNodeId = 0;
   const latchWrites = new Map();
   const nodeValues = new Map();
   const raisedNodes = new Map();
+  const raisedMultiNodes = new Map();
   const raisedOutputs = new Map();
 
   self.status = NETWORK_OFFLINE;
+
+  function flushMultiNodes() {
+    const nodes = Array.from(raisedMultiNodes, function ([id, evalMulti]) {
+      debug("Network.flushMultiNodes.process", id);
+      return evalMulti;
+    });
+    raisedMultiNodes.clear();
+    nodes.forEach(function Network_flushMultiNodes_process(evalMulti) {
+      if (self.status === NETWORK_OFFLINE) return;
+      evalMulti(self)();
+    });
+  }
+
+  function drainNodes() {
+    while (
+      (raisedMultiNodes.size > 0 || raisedNodes.size > 0) &&
+      self.status !== NETWORK_OFFLINE
+    ) {
+      if (raisedNodes.size > 0) {
+        const nodes = Array.from(
+          raisedNodes.values(),
+          function Network_drainNodes_collect(item) {
+            if (nodeValues.has(item.node.id)) {
+              console.error(
+                "Cycle detected in network. Node has been visited multiple times.",
+                item.node
+              );
+              throw new Error(
+                "Cycle detected in network. Node has been visited multiple times."
+              );
+            }
+            nodeValues.set(item.node.id, item.value);
+            return item;
+          }
+        );
+        raisedNodes.clear();
+        nodes.forEach(function Network_drainNodes_process({ value, node }) {
+          if (self.status === NETWORK_OFFLINE) return;
+          debug("Network.drainNodes.process", node.id, value);
+          node.traverseChildren((c) => c.fire(value));
+        });
+      }
+      if (self.status === NETWORK_OFFLINE) return;
+      if (raisedNodes.size === 0 && raisedMultiNodes.size > 0) {
+        flushMultiNodes();
+      }
+    }
+  }
 
   function evaluate() {
     debug("Network.evaluate");
     if (self.status === NETWORK_OFFLINE) return;
     self.status = NETWORK_EVALUATING;
-    while (raisedNodes.size > 0) {
-      const nodesArray = Array.from(raisedNodes.values(), function (item) {
-        if (nodeValues.has(item.node.id)) {
-          console.error(
-            "Cycle detected in network. Node has been visited multiple times.",
-            item.node
-          );
-          throw new Error(
-            "Cycle detected in network. Node has been visited multiple times."
-          );
-        }
-        nodeValues.set(item.node.id, item.value);
-        return item;
-      });
-      raisedNodes.clear();
-      nodesArray.forEach(function Network_evaluate_propagate({ value, node }) {
-        node.traverseChildren((c) => c.fire(value));
-      });
-    }
+    drainNodes();
     if (self.status === NETWORK_OFFLINE) return;
     nodeValues.clear();
     traverse(
       latchWrites.values(),
       function Network_evaluate_writeLatch({ value, latch }) {
+        debug("Network.writeLatch", latch.id, value);
         latch.write(value);
       }
     );
     latchWrites.clear();
     self.status = NETWORK_EMITTING;
-    traverse(raisedOutputs.values(), function ({ value, sink }) {
+    traverse(raisedOutputs.entries(), function ([id, { value, sink }]) {
+      debug("Network.emit", id, value);
       sink(value);
     });
     raisedOutputs.clear();
+    debug("Network.evaluate - done");
     self.status = NETWORK_STANDBY;
   }
 
@@ -298,20 +342,62 @@ function Network(scheduler) {
     });
   };
 
-  self.newNode = function Network_newNode(evalNode) {
-    debug("Network.newNode");
-    return newNode(function Network_newNode_makeNode(id) {
-      return Node(id, function Network_newNode_fire(value, node) {
+  self.newProcess = function Network_newProcess(evalNode) {
+    debug("Network.newProcess");
+    return newNode(function Network_newProcess_makeNode(id) {
+      return Node(id, function Network_newProcess_fire(inValue, node) {
         switch (self.status) {
           case NETWORK_EVALUATING:
-            evalNode(node)(value)(function Network_newNode_raise(newValue) {
-              return function Network_newNode_rase_raff(network) {
-                raisedNodes.set(id, { value: newValue, node });
+            function Network_newProcess_raise(outValue) {
+              return function Network_newProcess_rase_raff(network) {
+                raisedNodes.set(id, { value: outValue, node });
               };
-            })(self);
+            }
+            evalNode(node)(inValue)(Network_newProcess_raise)(self);
             break;
         }
       });
+    });
+  };
+
+  self.newMulti = function Network_newMulti(inputs, outputs, evalMulti) {
+    debug("Network.newMulti");
+    const inputReads = {};
+    const outputWrites = {};
+    Object.entries(inputs).forEach(function ([k, inNode]) {
+      function Network_newMulti_readInput_raff(network) {
+        return function Network_newMulti_readInput_eff() {
+          return self.readNode(inNode.id);
+        };
+      }
+      inputReads[k] = Network_newMulti_readInput_raff;
+    });
+    Object.entries(outputs).forEach(function ([k, outNode]) {
+      function Network_newMulti_writeOutput(value) {
+        return function Network_newMulti_writeOutput_raff(network) {
+          return function Network_newMulti_writeOutput_eff() {
+            outNode.fire(value);
+          };
+        };
+      }
+      outputWrites[k] = Network_newMulti_writeOutput;
+    });
+    return newNode(function Network_newMulti_makeNode(id) {
+      return MultiNode(
+        id,
+        inputs,
+        outputs,
+        function Network_newMulti_fire(_, node) {
+          switch (self.status) {
+            case NETWORK_EVALUATING:
+              raisedMultiNodes.set(
+                id,
+                evalMulti(node)(inputReads)(outputWrites)
+              );
+              break;
+          }
+        }
+      );
     });
   };
 
@@ -328,6 +414,9 @@ function Network(scheduler) {
       self.status = NETWORK_OFFLINE;
       self.dispatchEvent(new Event("deactivated"));
       raisedNodes.clear();
+      raisedMultiNodes.clear();
+      latchWrites.clear();
+      nodeValues.clear();
       raisedOutputs.clear();
     }
   };
@@ -358,7 +447,9 @@ function Network(scheduler) {
   };
 
   self.readNode = function Network_readNode(id) {
-    return nodeValues.get(id);
+    const value = nodeValues.has(id) ? Just(nodeValues.get(id)) : Nothing;
+    debug("Network.readNode", value);
+    return value;
   };
 
   return self;
@@ -409,8 +500,8 @@ exports._onConnected = function onConnected(node, eff) {
 
 // Network API
 
-exports._withNetwork = function withNetwork(scheduler, eff) {
-  const network = Network(scheduler);
+exports._withNetwork = function withNetwork(Just, Nothing, scheduler, eff) {
+  const network = Network(Just, Nothing, scheduler);
   return eff(network)();
 };
 
@@ -434,10 +525,18 @@ exports.newLatch = function newLatch(initialValue) {
   };
 };
 
-exports.newNode = function newNode(evalNode) {
-  return function newNode_raff(network) {
-    return function newNode_eff() {
-      return network.newNode(evalNode);
+exports.newProcess = function newProcess(evalNode) {
+  return function newProcess_raff(network) {
+    return function newProcess_eff() {
+      return network.newProcess(evalNode);
+    };
+  };
+};
+
+exports._newMulti = function newMulti(inputs, outputs, evalMulti) {
+  return function newMulti_raff(network) {
+    return function newMulti_eff() {
+      return network.newMulti(inputs, outputs, evalMulti);
     };
   };
 };
@@ -464,10 +563,9 @@ exports.readLatch = function readLatch(latch) {
   };
 };
 
-exports._readNode = function readNode(Just, Nothing, node) {
+exports.readNode = function readNode(node) {
   return function readLatch_raff(network) {
-    const value = network.readNode(node.id);
-    return value ? Just(value) : Nothing;
+    return network.readNode(node.id);
   };
 };
 
