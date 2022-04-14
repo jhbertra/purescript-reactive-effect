@@ -3,7 +3,8 @@ module Effect.Reactive.Event (Event, EventIO, newEvent, sink) where
 import Prelude
 
 import Data.Compactable (class Compactable)
-import Data.Either (Either(..))
+import Data.Either (Either(..), hush)
+import Data.Filterable (class Filterable, filter, filterMap)
 import Data.Foldable (traverse_)
 import Effect (Effect)
 import Effect.Class (liftEffect)
@@ -61,6 +62,32 @@ instance Compactable (Event t) where
           nodeMab `addChild` nodeB
           pure $ mkExistsNode nodeB
     }
+
+instance Filterable (Event t) where
+  filter p (Event ra) = mkEvent do
+    existsNode <- ra
+    runExistsNode existsNode \nodeMa -> do
+      nodeA <- newProcess \_ a write -> when (p a) $ write a
+      nodeMa `addChild` nodeA
+      pure $ mkExistsNode nodeA
+  partition p e =
+    { yes: filter p e
+    , no: filter (not <<< p) e
+    }
+  filterMap f (Event ra) = mkEvent do
+    existsNode <- ra
+    runExistsNode existsNode \nodeMa -> do
+      nodeA <- newProcess \_ a write -> traverse_ write $ f a
+      nodeMa `addChild` nodeA
+      pure $ mkExistsNode nodeA
+  partitionMap f e =
+    { left: filterMap (hush <<< swapEither <<< f) e
+    , right: filterMap (hush <<< f) e
+    }
+    where
+    swapEither = case _ of
+      Left x -> Right x
+      Right y -> Left y
 
 newEvent :: forall t a. Raff t (EventIO t a)
 newEvent = do
