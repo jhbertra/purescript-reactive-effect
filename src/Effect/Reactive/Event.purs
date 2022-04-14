@@ -2,6 +2,9 @@ module Effect.Reactive.Event (Event, EventIO, newEvent, sink) where
 
 import Prelude
 
+import Data.Compactable (class Compactable)
+import Data.Either (Either(..))
+import Data.Foldable (traverse_)
 import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
@@ -32,6 +35,32 @@ instance Functor (Event t) where
       nodeB <- newProcess \_ a write -> write $ f $ a
       nodeA `addChild` nodeB
       pure $ mkExistsNode nodeB
+
+instance Compactable (Event t) where
+  compact (Event rma) = mkEvent do
+    existsNode <- rma
+    runExistsNode existsNode \nodeMa -> do
+      nodeA <- newProcess \_ ma write -> traverse_ write ma
+      nodeMa `addChild` nodeA
+      pure $ mkExistsNode nodeA
+  separate (Event rmab) =
+    { left: mkEvent do
+        existsNode <- rmab
+        runExistsNode existsNode \nodeMab -> do
+          nodeA <- newProcess \_ mab write -> case mab of
+            Left a -> write a
+            _ -> pure unit
+          nodeMab `addChild` nodeA
+          pure $ mkExistsNode nodeA
+    , right: mkEvent do
+        existsNode <- rmab
+        runExistsNode existsNode \nodeMab -> do
+          nodeB <- newProcess \_ mab write -> case mab of
+            Right b -> write b
+            _ -> pure unit
+          nodeMab `addChild` nodeB
+          pure $ mkExistsNode nodeB
+    }
 
 newEvent :: forall t a. Raff t (EventIO t a)
 newEvent = do
