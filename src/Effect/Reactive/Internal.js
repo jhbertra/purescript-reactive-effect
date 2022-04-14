@@ -1,7 +1,8 @@
 "use strict";
 
-const debugMode =
-  localStorage.getItem("Effect.Reactive.Internal.debugMode") === "true";
+const debugMode = false;
+// window.localStorage &&
+// localStorage.getItem("Effect.Reactive.Internal.debugMode") === "true";
 
 const NETWORK_OFFLINE = debugMode ? "OFFLINE" : 0;
 const NETWORK_STANDBY = debugMode ? "STANDBY" : 1;
@@ -18,6 +19,14 @@ function AnimationFrameScheduler() {
   return {
     schedule: function timeoutSchedulerSchedule(task) {
       requestAnimationFrame(task);
+    },
+  };
+}
+
+function TimeoutScheduler() {
+  return {
+    schedule: function timeoutSchedulerSchedule(task) {
+      setTimeout(task, 0);
     },
   };
 }
@@ -120,6 +129,7 @@ function Node(id, fire) {
   };
 
   self.addChild = function Node_addChild(child) {
+    debug("Node.addChild", self.id, child.id);
     if (self.children.has(child.id)) return;
     self.children.set(child.id, child);
     child.addParent(self);
@@ -294,9 +304,11 @@ function Network(scheduler) {
       return Node(id, function Network_newNode_fire(value, node) {
         switch (self.status) {
           case NETWORK_EVALUATING:
-            evalNode(value, node, function Network_newNode_raise(newValue) {
-              raisedNodes.set(id, { value: newValue, node });
-            });
+            evalNode(node)(value)(function Network_newNode_raise(newValue) {
+              return function Network_newNode_rase_raff(network) {
+                raisedNodes.set(id, { value: newValue, node });
+              };
+            })(self);
             break;
         }
       });
@@ -305,6 +317,7 @@ function Network(scheduler) {
 
   self.actuate = function Network_actuate() {
     if (self.status === NETWORK_OFFLINE) {
+      debug("Network.actuate");
       self.status = NETWORK_STANDBY;
       self.dispatchEvent(new Event("actuated"));
     }
@@ -344,5 +357,126 @@ function Network(scheduler) {
     }
   };
 
+  self.readNode = function Network_readNode(id) {
+    return nodeValues.get(id);
+  };
+
   return self;
 }
+
+// Node API
+
+exports._addParent = function addParent(child, parent) {
+  child.addParent(parent);
+};
+
+exports._removeParent = function removeParent(child, parent) {
+  child.removeParent(parent);
+};
+
+exports._addChild = function addChild(parent, child) {
+  parent.addChild(child);
+};
+
+exports._removeChild = function removeChild(parent, child) {
+  parent.removeChild(child);
+};
+
+exports._fire = function fire(value, node) {
+  node.fire(value);
+};
+
+exports._onConnected = function onConnected(node, eff) {
+  let disconnectedListener;
+  function connected() {
+    const disconnected = eff();
+    function wrapDisconnected() {
+      disconnected();
+      node.removeEventListener("disconnected", wrapDisconnected);
+      disconnectedListener = null;
+    }
+    disconnectedListener = wrapDisconnected;
+    node.addEventListener("disconnected", wrapDisconnected);
+  }
+  node.addEventListener("connected", connected);
+  return function () {
+    node.removeEventListener("connected", connected);
+    if (disconnectedListener) {
+      node.removeEventListener("disconnected", disconnectedListener);
+    }
+  };
+};
+
+// Network API
+
+exports._withNetwork = function withNetwork(scheduler, eff) {
+  const network = Network(scheduler);
+  return eff(network)();
+};
+
+exports.newInput = function newInput(network) {
+  return network.newInput;
+};
+
+exports.newOutput = function newOutput(eff) {
+  return function newOutput_raff(network) {
+    return function newOutput_eff() {
+      return network.newOutput((a) => eff(a)());
+    };
+  };
+};
+
+exports.newLatch = function newLatch(initialValue) {
+  return function newLatch_raff(network) {
+    return function newLatch_eff() {
+      return network.newLatch(initialValue);
+    };
+  };
+};
+
+exports.newNode = function newNode(evalNode) {
+  return function newNode_raff(network) {
+    return function newNode_eff() {
+      return network.newNode(evalNode);
+    };
+  };
+};
+
+exports.actuate = function actuate(network) {
+  return network.actuate;
+};
+
+exports.deactivate = function deactivate(network) {
+  return network.deactivate;
+};
+
+exports.resume = function resume(network) {
+  return network.resume;
+};
+
+exports.suspend = function suspend(network) {
+  return network.suspend;
+};
+
+exports.readLatch = function readLatch(latch) {
+  return function readLatch_raff() {
+    return latch.read;
+  };
+};
+
+exports._readNode = function readNode(Just, Nothing, node) {
+  return function readLatch_raff(network) {
+    const value = network.readNode(node.id);
+    return value ? Just(value) : Nothing;
+  };
+};
+
+// Scheduler API
+
+exports.timeoutScheduler = TimeoutScheduler();
+
+exports.animationFrameScheduler = AnimationFrameScheduler();
+
+exports.schedule = function schedule(scheduler) {
+  return scheduler.schedule;
+};
