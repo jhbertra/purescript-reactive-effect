@@ -109,6 +109,19 @@ instance Alt (Event t) where
           traverse_ outputs.out $ ma <|> mb
         pure $ mkExistsNode out
 
+instance Apply (Event t) where
+  apply (Event rf) (Event ra) = mkEvent do
+    ef <- rf
+    ea <- ra
+    runExistsNode ef \f -> do
+      runExistsNode ea \a -> do
+        out <- newBuffer
+        _ <- newMulti { f, a } { out } \_ inputs outputs -> do
+          mf <- inputs.f
+          ma <- inputs.a
+          traverse_ outputs.out $ mf <*> ma
+        pure $ mkExistsNode out
+
 instance Plus (Event t) where
   empty = mkEvent $ mkExistsNode <$> emptyNode
 
