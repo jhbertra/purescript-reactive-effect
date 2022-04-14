@@ -1,8 +1,6 @@
 "use strict";
 
 const debugMode = false;
-// window.localStorage &&
-// localStorage.getItem("Effect.Reactive.Internal.debugMode") === "true";
 
 const NETWORK_OFFLINE = debugMode ? "OFFLINE" : 0;
 const NETWORK_STANDBY = debugMode ? "STANDBY" : 1;
@@ -290,6 +288,38 @@ function Network(Just, Nothing, scheduler) {
     return node;
   }
 
+  self.empty = new EventTarget();
+  self.empty.id = nextNodeId++;
+  self.empty.outputs = new Map();
+  self.empty.inputs = new Map();
+  self.empty.parents = new Map();
+  self.empty.children = new Map();
+  self.empty.traverseChildren = function Network_empty_traverseChildren() {};
+  self.empty.traverseParents = function Network_empty_traverseParents() {};
+  self.empty.addInput = function Network_empty_addInput() {};
+  self.empty.addOutput = function Network_empty_addOutput() {};
+  self.empty.removeInput = function Network_empty_removeInput() {};
+  self.empty.removeOutput = function Network_empty_removeOutput() {};
+  self.empty.addParent = function Network_empty_addParent() {};
+  self.empty.removeParent = function Network_empty_removeParent() {};
+  self.empty.addChild = function Network_empty_addChild() {};
+  self.empty.removeChild = function Network_empty_removeChild() {};
+  self.empty.fire = function Network_empty_fire() {};
+
+  self.newBuffer = function Network_newBuffer() {
+    debug("Network.newBuffer");
+    return newNode(function Network_newBuffer_makeNode(id) {
+      return Node(id, function Network_newBuffer_fire(value, node) {
+        switch (self.status) {
+          case NETWORK_EVALUATING:
+            nodeValues.set(node.id, value);
+            node.traverseChildren((c) => c.fire(value));
+            break;
+        }
+      });
+    });
+  };
+
   self.newInput = function Network_newInput() {
     debug("Network.newInput");
     return newNode(function Network_newInput_makeNode(id) {
@@ -507,6 +537,16 @@ exports._withNetwork = function withNetwork(Just, Nothing, scheduler, eff) {
 
 exports.newInput = function newInput(network) {
   return network.newInput;
+};
+
+exports.newBuffer = function newBuffer(network) {
+  return network.newBuffer;
+};
+
+exports.emptyNode = function emptyNode(network) {
+  return function () {
+    return network.empty;
+  };
 };
 
 exports.newOutput = function newOutput(eff) {

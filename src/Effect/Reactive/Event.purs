@@ -2,6 +2,8 @@ module Effect.Reactive.Event (Event, EventIO, newEvent, sink) where
 
 import Prelude
 
+import Control.Alt (class Alt, (<|>))
+import Control.Plus (class Plus)
 import Data.Compactable (class Compactable)
 import Data.Either (Either(..), hush)
 import Data.Filterable (class Filterable, filter, filterMap)
@@ -13,9 +15,12 @@ import Effect.Reactive.Internal
   , Raff
   , addChild
   , cached
+  , emptyNode
   , fire
   , mkExistsNode
+  , newBuffer
   , newInput
+  , newMulti
   , newOutput
   , newProcess
   , removeChild
@@ -88,6 +93,22 @@ instance Filterable (Event t) where
     swapEither = case _ of
       Left x -> Right x
       Right y -> Left y
+
+instance Alt (Event t) where
+  alt (Event ra) (Event rb) = mkEvent do
+    ea <- ra
+    eb <- rb
+    runExistsNode ea \a -> do
+      runExistsNode eb \b -> do
+        out <- newBuffer
+        _ <- newMulti { a, b } { out } \_ inputs outputs -> do
+          ma <- inputs.a
+          mb <- inputs.b
+          traverse_ outputs.out $ ma <|> mb
+        pure $ mkExistsNode out
+
+instance Plus (Event t) where
+  empty = mkEvent $ mkExistsNode <$> emptyNode
 
 newEvent :: forall t a. Raff t (EventIO t a)
 newEvent = do

@@ -10,6 +10,7 @@ module Effect.Reactive.Internal
   , ExistsNode
   , MultiNode
   , InputNode
+  , BufferNode
   , ProcessNode
   , OutputNode
   , LatchNode
@@ -27,6 +28,7 @@ module Effect.Reactive.Internal
   , toNode
   , onConnected
   , newInput
+  , newBuffer
   , newOutput
   , newLatch
   , newProcess
@@ -40,6 +42,7 @@ module Effect.Reactive.Internal
   , mkExistsNode
   , cached
   , runExistsNode
+  , emptyNode
   ) where
 
 import Prelude
@@ -84,6 +87,8 @@ foreign import data ProcessNode :: Timeline -> Type -> Type -> Type
 
 foreign import data InputNode :: Timeline -> Type -> Type
 
+foreign import data BufferNode :: Timeline -> Type -> Type
+
 foreign import data OutputNode :: Timeline -> Type -> Type
 
 foreign import data LatchNode :: Timeline -> Type -> Type
@@ -104,6 +109,9 @@ instance IsNode t Unit Unit (MultiNode ri ro b) where
   toNode = unsafeCoerce
 
 instance IsNode t a a (InputNode t a) where
+  toNode = unsafeCoerce
+
+instance IsNode t a a (BufferNode t a) where
   toNode = unsafeCoerce
 
 instance IsNode t a a (OutputNode t a) where
@@ -199,6 +207,11 @@ instance HasParents t x x (OutputNode t x) where
   removeParent p c = liftEffect $ runEffectFn2 _removeParent (toNode p)
     (toNode c)
 
+instance HasParents t x x (BufferNode t x) where
+  addParent p c = liftEffect $ runEffectFn2 _addParent (toNode p) (toNode c)
+  removeParent p c = liftEffect $ runEffectFn2 _removeParent (toNode p)
+    (toNode c)
+
 instance HasParents t x x (LatchNode t x) where
   addParent p c = liftEffect $ runEffectFn2 _addParent (toNode p) (toNode c)
   removeParent p c = liftEffect $ runEffectFn2 _removeParent (toNode p)
@@ -214,6 +227,10 @@ class IsNode t x y p <= HasChildren t x y p | p -> t x y where
   removeChild :: forall z c. HasParents t y z c => p -> c -> Raff t Unit
 
 instance HasChildren t x x (InputNode t x) where
+  addChild p c = liftEffect $ runEffectFn2 _addChild (toNode p) (toNode c)
+  removeChild p c = liftEffect $ runEffectFn2 _removeChild (toNode p) (toNode c)
+
+instance HasChildren t x x (BufferNode t x) where
   addChild p c = liftEffect $ runEffectFn2 _addChild (toNode p) (toNode c)
   removeChild p c = liftEffect $ runEffectFn2 _removeChild (toNode p) (toNode c)
 
@@ -233,6 +250,8 @@ onConnected
 onConnected = runEffectFn2 _onConnected
 
 foreign import newInput :: forall t a. Raff t (InputNode t a)
+foreign import emptyNode :: forall t a. Raff t (BufferNode t a)
+foreign import newBuffer :: forall t a. Raff t (BufferNode t a)
 foreign import newOutput
   :: forall t a. (a -> Effect Unit) -> Raff t (OutputNode t a)
 
