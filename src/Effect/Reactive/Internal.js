@@ -195,9 +195,11 @@ function LatchNode(id, initialValue, fire) {
   const self = Node(id, fire);
   let value = initialValue;
   self.write = function LatchNode_write(x) {
-    return (value = x);
+    debug("LatchNode.write", x);
+    value = x;
   };
   self.read = function LatchNode_read() {
+    debug("LatchNode.read", value);
     return value;
   };
   return self;
@@ -420,11 +422,13 @@ function Network(Just, Nothing, scheduler) {
         switch (self.status) {
           case NETWORK_EVALUATING:
             function Network_newProcess_raise(outValue) {
-              return function Network_newProcess_rase_raff(network) {
-                raisedNodes.set(id, { value: outValue, node });
+              return function Network_newProcess_raise_raff(network) {
+                return function Network_newProcess_raise_eff() {
+                  raisedNodes.set(id, { value: outValue, node });
+                };
               };
             }
-            evalNode(node)(inValue)(Network_newProcess_raise)(self);
+            evalNode(node)(inValue)(Network_newProcess_raise)(self)();
             break;
         }
       });
@@ -651,7 +655,9 @@ exports.suspend = function suspend(network) {
 
 exports.readLatch = function readLatch(latch) {
   return function readLatch_raff() {
-    return latch.read;
+    return function readLatch_eff() {
+      return latch.read();
+    };
   };
 };
 

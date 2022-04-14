@@ -1,13 +1,14 @@
 module Effect.Reactive.Internal
   ( class IsNode
-  , class HasChildren
-  , class HasParents
+  , class IsChild
+  , class IsParent
   , class InputRow
   , class OutputRow
   , Scheduler
   , Node
   , EvalProcess
-  , ExistsNode
+  , ChildNode
+  , ParentNode
   , MultiNode
   , InputNode
   , BufferNode
@@ -24,7 +25,9 @@ module Effect.Reactive.Internal
   , removeParent
   , addChild
   , removeChild
+  , toChild
   , toNode
+  , toParent
   , onConnected
   , newInput
   , newBuffer
@@ -38,11 +41,10 @@ module Effect.Reactive.Internal
   , resume
   , suspend
   , fire
-  , mkExistsNode
   , cached
-  , runExistsNode
   , emptyNode
   , networkTime
+  , readLatch
   ) where
 
 import Prelude
@@ -81,6 +83,10 @@ foreign import data ProcessNode :: Timeline -> Type -> Type -> Type
 
 foreign import data InputNode :: Timeline -> Type -> Type
 
+foreign import data ChildNode :: Timeline -> Type -> Type -> Type
+
+foreign import data ParentNode :: Timeline -> Type -> Type -> Type
+
 foreign import data BufferNode :: Timeline -> Type -> Type
 
 foreign import data OutputNode :: Timeline -> Type -> Type
@@ -105,6 +111,12 @@ instance IsNode t Unit Unit (MultiNode ri ro b) where
 instance IsNode t a a (InputNode t a) where
   toNode = unsafeCoerce
 
+instance IsNode t a b (ParentNode t b a) where
+  toNode = unsafeCoerce
+
+instance IsNode t a b (ChildNode t a b) where
+  toNode = unsafeCoerce
+
 instance IsNode t a a (BufferNode t a) where
   toNode = unsafeCoerce
 
@@ -117,19 +129,47 @@ instance IsNode t a a (LatchNode t a) where
 instance IsNode t a b (ProcessNode t a b) where
   toNode = unsafeCoerce
 
-newtype ExistsNode t b = ExistsNode
-  (forall r. (forall a node. HasChildren t a b node => node -> r) -> r)
+class IsNode t b a n <= IsParent t a b n | n -> t a b where
+  toParent :: n -> ParentNode t a b
 
-mkExistsNode
-  :: forall t a b node. HasChildren t a b node => node -> ExistsNode t b
-mkExistsNode node = ExistsNode \k -> k node
+instance IsParent t a b (ParentNode t a b) where
+  toParent = identity
 
-runExistsNode
-  :: forall t b r
-   . ExistsNode t b
-  -> (forall a node. HasChildren t a b node => node -> r)
-  -> r
-runExistsNode (ExistsNode cont) = cont
+instance IsParent t Unit Unit (MultiNode ri ro b) where
+  toParent = unsafeCoerce
+
+instance IsParent t a a (InputNode t a) where
+  toParent = unsafeCoerce
+
+instance IsParent t a a (BufferNode t a) where
+  toParent = unsafeCoerce
+
+instance IsParent t a a (LatchNode t a) where
+  toParent = unsafeCoerce
+
+instance IsParent t b a (ProcessNode t a b) where
+  toParent = unsafeCoerce
+
+class IsNode t a b n <= IsChild t a b n | n -> t a b where
+  toChild :: n -> ChildNode t a b
+
+instance IsChild t a b (ChildNode t a b) where
+  toChild = identity
+
+instance IsChild t Unit Unit (MultiNode ri ro b) where
+  toChild = unsafeCoerce
+
+instance IsChild t a a (OutputNode t a) where
+  toChild = unsafeCoerce
+
+instance IsChild t a a (BufferNode t a) where
+  toChild = unsafeCoerce
+
+instance IsChild t a a (LatchNode t a) where
+  toChild = unsafeCoerce
+
+instance IsChild t a b (ProcessNode t a b) where
+  toChild = unsafeCoerce
 
 foreign import data Scheduler :: Type
 
@@ -174,65 +214,61 @@ derive newtype instance MonadReader (Network t) (Raff t)
 foreign import cached :: forall t a. Raff t a -> Raff t a
 
 foreign import _addParent
-  :: forall t a b c. EffectFn2 (Node t b c) (Node t a b) Unit
+  :: forall t a b c. EffectFn2 (ChildNode t b c) (ParentNode t b a) Unit
 
 foreign import _removeParent
-  :: forall t a b c. EffectFn2 (Node t b c) (Node t a b) Unit
+  :: forall t a b c. EffectFn2 (ChildNode t b c) (ParentNode t b a) Unit
 
 foreign import _addChild
-  :: forall t a b c. EffectFn2 (Node t a b) (Node t b c) Unit
+  :: forall t a b c. EffectFn2 (ParentNode t b a) (ChildNode t b c) Unit
 
 foreign import _removeChild
-  :: forall t a b c. EffectFn2 (Node t a b) (Node t b c) Unit
+  :: forall t a b c. EffectFn2 (ParentNode t b a) (ChildNode t b c) Unit
 
 foreign import _fire :: forall t a. EffectFn2 a (InputNode t a) Unit
 
 foreign import _onConnected
   :: forall t a b. EffectFn2 (Node t a b) (Effect (Effect Unit)) (Effect Unit)
 
-class IsNode t x y p <= HasParents t x y p | p -> t x y where
-  addParent :: forall z c. HasChildren t z x c => p -> c -> Raff t Unit
-  removeParent :: forall z c. HasChildren t z x c => p -> c -> Raff t Unit
+addParent
+  :: forall t x y z c p
+   . IsChild t y z c
+  => IsParent t y x p
+  => c
+  -> p
+  -> Raff t Unit
+addParent c p =
+  liftEffect $ runEffectFn2 _addParent (toChild c) (toParent p)
 
-instance HasParents t x x (OutputNode t x) where
-  addParent p c = liftEffect $ runEffectFn2 _addParent (toNode p) (toNode c)
-  removeParent p c = liftEffect $ runEffectFn2 _removeParent (toNode p)
-    (toNode c)
+removeParent
+  :: forall t x y z c p
+   . IsChild t y z c
+  => IsParent t y x p
+  => c
+  -> p
+  -> Raff t Unit
+removeParent c p =
+  liftEffect $ runEffectFn2 _removeParent (toChild c) (toParent p)
 
-instance HasParents t x x (BufferNode t x) where
-  addParent p c = liftEffect $ runEffectFn2 _addParent (toNode p) (toNode c)
-  removeParent p c = liftEffect $ runEffectFn2 _removeParent (toNode p)
-    (toNode c)
+addChild
+  :: forall t x y z c p
+   . IsParent t y x p
+  => IsChild t y z c
+  => p
+  -> c
+  -> Raff t Unit
+addChild p c =
+  liftEffect $ runEffectFn2 _addChild (toParent p) (toChild c)
 
-instance HasParents t x x (LatchNode t x) where
-  addParent p c = liftEffect $ runEffectFn2 _addParent (toNode p) (toNode c)
-  removeParent p c = liftEffect $ runEffectFn2 _removeParent (toNode p)
-    (toNode c)
-
-instance HasParents t x y (ProcessNode t x y) where
-  addParent p c = liftEffect $ runEffectFn2 _addParent (toNode p) (toNode c)
-  removeParent p c = liftEffect $ runEffectFn2 _removeParent (toNode p)
-    (toNode c)
-
-class IsNode t x y p <= HasChildren t x y p | p -> t x y where
-  addChild :: forall z c. HasParents t y z c => p -> c -> Raff t Unit
-  removeChild :: forall z c. HasParents t y z c => p -> c -> Raff t Unit
-
-instance HasChildren t x x (InputNode t x) where
-  addChild p c = liftEffect $ runEffectFn2 _addChild (toNode p) (toNode c)
-  removeChild p c = liftEffect $ runEffectFn2 _removeChild (toNode p) (toNode c)
-
-instance HasChildren t x x (BufferNode t x) where
-  addChild p c = liftEffect $ runEffectFn2 _addChild (toNode p) (toNode c)
-  removeChild p c = liftEffect $ runEffectFn2 _removeChild (toNode p) (toNode c)
-
-instance HasChildren t x x (LatchNode t x) where
-  addChild p c = liftEffect $ runEffectFn2 _addChild (toNode p) (toNode c)
-  removeChild p c = liftEffect $ runEffectFn2 _removeChild (toNode p) (toNode c)
-
-instance HasChildren t x y (ProcessNode t x y) where
-  addChild p c = liftEffect $ runEffectFn2 _addChild (toNode p) (toNode c)
-  removeChild p c = liftEffect $ runEffectFn2 _removeChild (toNode p) (toNode c)
+removeChild
+  :: forall t x y z c p
+   . IsParent t y x p
+  => IsChild t y z c
+  => p
+  -> c
+  -> Raff t Unit
+removeChild p c =
+  liftEffect $ runEffectFn2 _removeChild (toParent p) (toChild c)
 
 fire :: forall t a. a -> InputNode t a -> Raff t Unit
 fire a = liftEffect <<< runEffectFn2 _fire a
@@ -284,7 +320,7 @@ class InputRow t r rRead rl | rl -> r rRead t
 instance InputRow t () () RL.Nil
 
 instance
-  ( HasChildren t x y node
+  ( IsParent t y x node
   , Row.Cons label node r' r
   , Row.Cons label (Raff t (Maybe y)) rRead' rRead
   , InputRow t r' rRead' rl
@@ -298,7 +334,7 @@ class OutputRow t r rWrite rl | rl -> r rWrite t
 instance OutputRow t () () RL.Nil
 
 instance
-  ( HasParents t x y node
+  ( IsChild t x y node
   , Row.Cons label node r' r
   , Row.Cons label (x -> Raff t Unit) rWrite' rWrite
   , OutputRow t r' rWrite' rl
