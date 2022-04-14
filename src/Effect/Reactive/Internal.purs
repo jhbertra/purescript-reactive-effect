@@ -7,6 +7,7 @@ module Effect.Reactive.Internal
   , Scheduler
   , Node
   , EvalProcess
+  , ExistsNode
   , MultiNode
   , InputNode
   , ProcessNode
@@ -36,6 +37,9 @@ module Effect.Reactive.Internal
   , suspend
   , fire
   , readNode
+  , mkExistsNode
+  , cached
+  , runExistsNode
   ) where
 
 import Prelude
@@ -96,6 +100,9 @@ class IsNode t a b n | n -> t a b where
 instance IsNode t a b (Node t a b) where
   toNode = identity
 
+instance IsNode t Unit Unit (MultiNode ri ro b) where
+  toNode = unsafeCoerce
+
 instance IsNode t a a (InputNode t a) where
   toNode = unsafeCoerce
 
@@ -107,6 +114,20 @@ instance IsNode t a a (LatchNode t a) where
 
 instance IsNode t a b (ProcessNode t a b) where
   toNode = unsafeCoerce
+
+newtype ExistsNode t b = ExistsNode
+  (forall r. (forall a node. HasChildren t a b node => node -> r) -> r)
+
+mkExistsNode
+  :: forall t a b node. HasChildren t a b node => node -> ExistsNode t b
+mkExistsNode node = ExistsNode \k -> k node
+
+runExistsNode
+  :: forall t b r
+   . ExistsNode t b
+  -> (forall a node. HasChildren t a b node => node -> r)
+  -> r
+runExistsNode (ExistsNode cont) = cont
 
 foreign import data Scheduler :: Type
 
@@ -149,6 +170,8 @@ derive newtype instance MonadError Error (Raff t)
 derive newtype instance MonadRec (Raff t)
 derive newtype instance MonadAsk (Network t) (Raff t)
 derive newtype instance MonadReader (Network t) (Raff t)
+
+foreign import cached :: forall t a. Raff t a -> Raff t a
 
 foreign import _addParent
   :: forall t a b c. EffectFn2 (Node t b c) (Node t a b) Unit

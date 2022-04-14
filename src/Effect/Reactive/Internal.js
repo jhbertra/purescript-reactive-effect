@@ -578,3 +578,19 @@ exports.animationFrameScheduler = AnimationFrameScheduler();
 exports.schedule = function schedule(scheduler) {
   return scheduler.schedule;
 };
+
+// Raff API
+
+exports.cached = function cached(raff) {
+  const result = {};
+  return function cached_raff(network) {
+    return function cached_eff() {
+      if (!result.hasOwnProperty("value")) {
+        debug("Running cached raff", raff);
+        result.value = raff(network)();
+      }
+      debug("Retrning cached raff result", result.value);
+      return result.value;
+    };
+  };
+};
