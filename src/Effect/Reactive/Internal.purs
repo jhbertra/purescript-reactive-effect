@@ -19,7 +19,6 @@ module Effect.Reactive.Internal
   , withNetwork
   , timeoutScheduler
   , animationFrameScheduler
-  , schedule
   , runRaff
   , addParent
   , removeParent
@@ -31,6 +30,7 @@ module Effect.Reactive.Internal
   , newBuffer
   , newOutput
   , newLatch
+  , newExecute
   , newProcess
   , newMulti
   , actuate
@@ -38,11 +38,11 @@ module Effect.Reactive.Internal
   , resume
   , suspend
   , fire
-  , readNode
   , mkExistsNode
   , cached
   , runExistsNode
   , emptyNode
+  , networkTime
   ) where
 
 import Prelude
@@ -62,14 +62,8 @@ import Data.Maybe (Maybe(..))
 import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (Error)
-import Effect.Reactive.Types (Timeline)
-import Effect.Uncurried
-  ( EffectFn1
-  , EffectFn2
-  , EffectFn4
-  , runEffectFn2
-  , runEffectFn4
-  )
+import Effect.Reactive.Types (Time, Timeline)
+import Effect.Uncurried (EffectFn2, EffectFn4, runEffectFn2, runEffectFn4)
 import Effect.Unlift (class MonadUnliftEffect)
 import Prim.Row as Row
 import Prim.RowList (class RowToList, RowList)
@@ -148,8 +142,6 @@ foreign import _withNetwork
 foreign import timeoutScheduler :: Scheduler
 
 foreign import animationFrameScheduler :: Scheduler
-
-foreign import schedule :: Scheduler -> EffectFn1 (Effect Unit) Unit
 
 withNetwork
   :: forall r. Scheduler -> (forall t. Network t -> Effect r) -> Effect r
@@ -259,6 +251,9 @@ foreign import newLatch :: forall t a. a -> Raff t (LatchNode t a)
 foreign import newProcess
   :: forall t a b. EvalProcess t a b -> Raff t (ProcessNode t a b)
 
+foreign import newExecute
+  :: forall t a b. (a -> Raff t b) -> Raff t (ProcessNode t a b)
+
 foreign import _newMulti
   :: forall t ri riRead ro roWrite
    . Fn3 { | ri } { | ro } (EvalMulti t ri riRead ro roWrite)
@@ -269,7 +264,7 @@ foreign import deactivate :: forall t. Raff t Unit
 foreign import resume :: forall t. Raff t Unit
 foreign import suspend :: forall t. Raff t Unit
 foreign import readLatch :: forall t a. LatchNode t a -> Raff t a
-foreign import readNode :: forall t a b. Node t a b -> Raff t (Maybe b)
+foreign import networkTime :: forall t. Raff t (Time t)
 
 newMulti
   :: forall t rli ri riRead rlo ro roWrite

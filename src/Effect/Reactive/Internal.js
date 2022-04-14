@@ -13,18 +13,42 @@ const debug = debugMode ? console.debug : () => {};
 const log = debugMode ? console.log : () => {};
 const warn = debugMode ? console.warn : () => {};
 
+let nextSchedulerId = 0;
+
 function AnimationFrameScheduler() {
+  const id = nextSchedulerId++;
+  let offset;
+  function AnimationFrameScheduler_reset() {
+    offset = performance.now();
+  }
+  AnimationFrameScheduler_reset();
   return {
-    schedule: function timeoutSchedulerSchedule(task) {
-      requestAnimationFrame(task);
+    reset: AnimationFrameScheduler_reset,
+    schedule: function AnimationFrameScheduler_schedule(task) {
+      requestAnimationFrame(function AnimationFrameScheduler_run(timestamp) {
+        task(timestamp - offset);
+      });
     },
   };
 }
 
 function TimeoutScheduler() {
+  const id = nextSchedulerId++;
+  const marker = "timeout-schedule-" + id;
+  const measurement = marker + "-measurement";
+  function TimeoutScheduler_reset() {
+    performance.mark(marker);
+  }
+  TimeoutScheduler_reset();
   return {
-    schedule: function timeoutSchedulerSchedule(task) {
-      setTimeout(task, 0);
+    reset: TimeoutScheduler_reset,
+    schedule: function TimeoutScheduler_schedule(task) {
+      setTimeout(function TimeoutScheduler_run() {
+        performance.measure(measurement, marker);
+        const [entry] = performance.getEntriesByName(measurement);
+        performance.clearMeasures(measurement);
+        task(entry.duration);
+      }, 0);
     },
   };
 }
@@ -196,6 +220,7 @@ function Network(Just, Nothing, scheduler) {
   const raisedOutputs = new Map();
 
   self.status = NETWORK_OFFLINE;
+  self.timestamp = Number.NEGATIVE_INFINITY;
 
   function flushMultiNodes() {
     const nodes = Array.from(raisedMultiNodes, function ([id, evalMulti]) {
@@ -245,8 +270,9 @@ function Network(Just, Nothing, scheduler) {
     }
   }
 
-  function evaluate() {
+  function evaluate(timestamp) {
     debug("Network.evaluate");
+    self.timestamp = timestamp;
     if (self.status === NETWORK_OFFLINE) return;
     self.status = NETWORK_EVALUATING;
     drainNodes();
@@ -326,6 +352,7 @@ function Network(Just, Nothing, scheduler) {
       return InputNode(id, function Network_newInput_fire(value, node) {
         switch (self.status) {
           case NETWORK_STANDBY:
+            self.status = NETWORK_SCHEDULED;
             raisedNodes.set(id, { value, node });
             scheduler.schedule(evaluate);
             break;
@@ -369,6 +396,20 @@ function Network(Just, Nothing, scheduler) {
           }
         }
       );
+    });
+  };
+
+  self.newExecute = function Network_newExecute(execute) {
+    debug("Network.newExecute");
+    return newNode(function Network_newExecute_makeNode(id) {
+      return Node(id, function Network_newExecute_fire(inValue, node) {
+        switch (self.status) {
+          case NETWORK_EVALUATING:
+            const outValue = execute(inValue)(self)();
+            raisedNodes.set(id, { value: outValue, node });
+            break;
+        }
+      });
     });
   };
 
@@ -434,6 +475,8 @@ function Network(Just, Nothing, scheduler) {
   self.actuate = function Network_actuate() {
     if (self.status === NETWORK_OFFLINE) {
       debug("Network.actuate");
+      scheduler.reset();
+      self.timestamp = 0;
       self.status = NETWORK_STANDBY;
       self.dispatchEvent(new Event("actuated"));
     }
@@ -442,6 +485,7 @@ function Network(Just, Nothing, scheduler) {
   self.deactivate = function Network_deactivate() {
     if (self.status !== NETWORK_OFFLINE) {
       self.status = NETWORK_OFFLINE;
+      self.timestamp = Number.NEGATIVE_INFINITY;
       self.dispatchEvent(new Event("deactivated"));
       raisedNodes.clear();
       raisedMultiNodes.clear();
@@ -573,6 +617,14 @@ exports.newProcess = function newProcess(evalNode) {
   };
 };
 
+exports.newExecute = function newExecute(execute) {
+  return function newExecute_raff(network) {
+    return function newExecute_eff() {
+      return network.newExecute(execute);
+    };
+  };
+};
+
 exports._newMulti = function newMulti(inputs, outputs, evalMulti) {
   return function newMulti_raff(network) {
     return function newMulti_eff() {
@@ -603,9 +655,9 @@ exports.readLatch = function readLatch(latch) {
   };
 };
 
-exports.readNode = function readNode(node) {
-  return function readLatch_raff(network) {
-    return network.readNode(node.id);
+exports.networkTime = function networkTime(network) {
+  return function networkTime_eff() {
+    return network.timestamp;
   };
 };
 
@@ -614,10 +666,6 @@ exports.readNode = function readNode(node) {
 exports.timeoutScheduler = TimeoutScheduler();
 
 exports.animationFrameScheduler = AnimationFrameScheduler();
-
-exports.schedule = function schedule(scheduler) {
-  return scheduler.schedule;
-};
 
 // Raff API
 

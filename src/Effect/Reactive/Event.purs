@@ -1,4 +1,12 @@
-module Effect.Reactive.Event (Event, EventIO, newEvent, sink) where
+module Effect.Reactive.Event
+  ( Event
+  , EventIO
+  , newEvent
+  , sink
+  , execute
+  , executeMap
+  , withTime
+  ) where
 
 import Prelude
 
@@ -10,6 +18,7 @@ import Data.Either (Either(..), hush)
 import Data.Filterable (class Filterable, filter, filterMap)
 import Data.Foldable (traverse_)
 import Data.These (these)
+import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
@@ -20,7 +29,9 @@ import Effect.Reactive.Internal
   , emptyNode
   , fire
   , mkExistsNode
+  , networkTime
   , newBuffer
+  , newExecute
   , newInput
   , newMulti
   , newOutput
@@ -28,6 +39,7 @@ import Effect.Reactive.Internal
   , removeChild
   , runExistsNode
   )
+import Effect.Reactive.Types (Time)
 import Safe.Coerce (coerce)
 
 newtype Event t a = Event (Raff t (ExistsNode t a))
@@ -162,3 +174,17 @@ sink (Event ra) eff = do
   runExistsNode existsNode \nodeA -> do
     nodeA `addChild` output
     pure $ nodeA `removeChild` output
+
+execute :: forall t a. Event t (Raff t a) -> Event t a
+execute = executeMap identity
+
+executeMap :: forall t a b. (a -> Raff t b) -> Event t a -> Event t b
+executeMap f (Event ra) = mkEvent do
+  ea <- ra
+  runExistsNode ea \nodeA -> do
+    nodeB <- newExecute f
+    nodeA `addChild` nodeB
+    pure $ mkExistsNode $ nodeB
+
+withTime :: forall t a. Event t a -> Event t (Tuple (Time t) a)
+withTime = executeMap \a -> Tuple <$> networkTime <@> a
