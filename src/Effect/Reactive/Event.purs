@@ -3,11 +3,13 @@ module Effect.Reactive.Event (Event, EventIO, newEvent, sink) where
 import Prelude
 
 import Control.Alt (class Alt, (<|>))
-import Control.Plus (class Plus)
+import Control.Plus (class Plus, empty)
+import Data.Align (class Align, class Alignable, align)
 import Data.Compactable (class Compactable)
 import Data.Either (Either(..), hush)
 import Data.Filterable (class Filterable, filter, filterMap)
 import Data.Foldable (traverse_)
+import Data.These (these)
 import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
@@ -109,6 +111,28 @@ instance Alt (Event t) where
 
 instance Plus (Event t) where
   empty = mkEvent $ mkExistsNode <$> emptyNode
+
+instance Align (Event t) where
+  align f (Event ra) (Event rb) = mkEvent do
+    ea <- ra
+    eb <- rb
+    runExistsNode ea \a -> do
+      runExistsNode eb \b -> do
+        out <- newBuffer
+        _ <- newMulti { a, b } { out } \_ inputs outputs -> do
+          ma <- inputs.a
+          mb <- inputs.b
+          traverse_ outputs.out $ align f ma mb
+        pure $ mkExistsNode out
+
+instance Alignable (Event t) where
+  nil = empty
+
+instance Semigroup a => Semigroup (Event t a) where
+  append = align $ these identity identity append
+
+instance Semigroup a => Monoid (Event t a) where
+  mempty = empty
 
 newEvent :: forall t a. Raff t (EventIO t a)
 newEvent = do
