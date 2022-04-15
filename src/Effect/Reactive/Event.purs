@@ -7,6 +7,7 @@ module Effect.Reactive.Event
   , executeMap
   , withTime
   , scanE
+  , switchE
   ) where
 
 import Prelude
@@ -244,3 +245,18 @@ scanE seed = map liftRaff $ runEvent \nodeF -> do
   nodeF `addChild` process
   process `addChild` latch
   pure $ Event $ pure $ mkExists $ toParent $ latch
+
+switchE :: forall t m a. MonadRaff t m => Event t (Event t a) -> m (Event t a)
+switchE = map liftRaff $ runEvent \nodeEventA -> do
+  currentRef <- liftEffect $ Ref.new Nothing
+  out <- newBuffer
+  process <- newProcess \_ write -> runEvent \nodeA -> do
+    mCurrent <- liftEffect (Ref.read currentRef)
+    traverse_ (runExists (removeParent out)) mCurrent
+    out `addParent` nodeA
+    liftEffect $ Ref.write (Just $ mkExists $ toParent $ nodeA) currentRef
+    ma <- readNode nodeA
+    traverse_ write ma
+  nodeEventA `addChild` process
+  process `addChild` out
+  pure $ Event $ pure $ mkExists $ toParent $ out
