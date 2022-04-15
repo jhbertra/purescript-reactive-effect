@@ -64,26 +64,25 @@ function traverse(iterator, f) {
 function Node(id, fire) {
   debug("Node", id);
   const self = new EventTarget();
+  const inputs = new Map();
+  const parents = new Map();
+  const children = new Map();
 
   self.id = id;
-  self.outputs = new Map();
-  self.inputs = new Map();
-  self.parents = new Map();
-  self.children = new Map();
 
   self.traverseChildren = function Node_traverseChildren(f) {
-    traverse(self.children.values(), f);
+    traverse(children.values(), f);
   };
 
   self.traverseParents = function Node_traverseParents(f) {
-    traverse(self.parents.values(), f);
+    traverse(parents.values(), f);
   };
 
   function isConnected() {
-    return self.inputs.size > 0 && self.outputs.size > 0;
+    return inputs.size > 0;
   }
 
-  function updateIO(f) {
+  function updateInputs(f) {
     const connectedBefore = isConnected();
     f();
     const connectedAfter = isConnected();
@@ -96,84 +95,56 @@ function Node(id, fire) {
 
   self.addInput = function Node_addInput(input) {
     debug("Node.addInput", self.id, input);
-    updateIO(function () {
-      const count = self.inputs.get(input) || 0;
-      self.inputs.set(input, count + 1);
+    updateInputs(function () {
+      const count = inputs.get(input) || 0;
+      inputs.set(input, count + 1);
       self.traverseChildren((c) => c.addInput(input));
     });
   };
 
-  self.addOutput = function Node_addOutput(output) {
-    debug("Node.addOutput", self.id, output);
-    updateIO(function () {
-      const count = self.outputs.get(output) || 0;
-      self.outputs.set(output, count + 1);
-      self.traverseParents((p) => p.addOutput(output));
-    });
-  };
-
   self.removeInput = function Node_removeInput(id) {
-    updateIO(function () {
-      const count = self.inputs.get(id);
+    updateInputs(function () {
+      const count = inputs.get(id);
       if (count) {
         const newCount = count - 1;
         if (newCount) {
-          self.inputs.set(id, count + 1);
+          inputs.set(id, count + 1);
         } else {
-          self.inputs.delete(id);
+          inputs.delete(id);
         }
         self.traverseChildren((c) => c.removeInput(id));
       }
     });
   };
 
-  self.removeOutput = function Node_removeOutput(id) {
-    updateIO(function () {
-      const count = self.outputs.get(id);
-      if (count) {
-        const newCount = count - 1;
-        if (newCount) {
-          self.outputs.set(id, count + 1);
-        } else {
-          self.outputs.delete(id);
-        }
-        self.traverseParents((p) => p.removeOutput(id));
-      }
-    });
-  };
-
   self.addParent = function Node_addParent(parent) {
-    if (self.parents.has(parent.id)) return;
+    if (parents.has(parent.id)) return;
     debug("Node.addParent", self.id, parent.id);
-    self.parents.set(parent.id, parent);
+    parents.set(parent.id, parent);
     parent.addChild(self);
   };
 
   self.removeParent = function Node_removeParent(parent) {
-    self.parents.delete(parent.id);
+    parents.delete(parent.id);
     parent.removeChild(self);
   };
 
   self.addChild = function Node_addChild(child) {
-    if (self.children.has(child.id)) return;
+    if (children.has(child.id)) return;
     debug("Node.addChild", self.id, child.id);
-    self.children.set(child.id, child);
+    children.set(child.id, child);
     child.addParent(self);
-    traverse(child.outputs.keys(), self.addOutput);
-    traverse(self.inputs.keys(), child.addInput);
+    traverse(inputs.keys(), child.addInput);
   };
 
   self.removeChild = function Node_removeChild(child) {
-    self.children.delete(child.id);
-    traverse(child.outputs.keys(), self.removeOutput);
-    traverse(self.inputs.keys(), child.removeInput);
+    children.delete(child.id);
+    traverse(inputs.keys(), child.removeInput);
   };
 
   self.fire = function Node_fire(value) {
-    debug("Node.fire", id, value, self.outputs, self.inputs);
-    if (self.outputs.size > 0 && self.inputs.size > 0) {
-      fire(value, self);
-    }
+    debug("Node.fire", id, value, inputs);
+    fire(value, self);
   };
 
   return self;
@@ -182,12 +153,16 @@ function Node(id, fire) {
 function InputNode(id, fire) {
   const self = Node(id, fire);
   self.addInput(self.id);
+  delete self.addParent;
+  delete self.addInput;
+  delete self.removeParent;
   return self;
 }
 
 function OutputNode(id, fire) {
   const self = Node(id, fire);
-  self.addOutput(self.id);
+  delete self.addChild;
+  delete self.removeChild;
   return self;
 }
 
@@ -217,85 +192,78 @@ function Network(Just, Nothing, scheduler) {
   let nextNodeId = 0;
   const latchWrites = new Map();
   const nodeValues = new Map();
-  const raisedNodes = new Map();
+  const raisedInputs = new Map();
   const raisedMultiNodes = new Map();
   const raisedOutputs = new Map();
 
   self.status = NETWORK_OFFLINE;
   self.timestamp = Number.NEGATIVE_INFINITY;
 
-  function flushMultiNodes() {
-    const nodes = Array.from(raisedMultiNodes, function ([id, evalMulti]) {
-      debug("Network.flushMultiNodes.process", id);
-      return evalMulti;
-    });
-    raisedMultiNodes.clear();
-    nodes.forEach(function Network_flushMultiNodes_process(evalMulti) {
-      if (self.status === NETWORK_OFFLINE) return;
-      evalMulti(self)();
-    });
-  }
-
-  function drainNodes() {
-    while (
-      (raisedMultiNodes.size > 0 || raisedNodes.size > 0) &&
-      self.status !== NETWORK_OFFLINE
-    ) {
-      if (raisedNodes.size > 0) {
-        const nodes = Array.from(
-          raisedNodes.values(),
-          function Network_drainNodes_collect(item) {
-            if (nodeValues.has(item.node.id)) {
-              console.error(
-                "Cycle detected in network. Node has been visited multiple times.",
-                item.node
-              );
-              throw new Error(
-                "Cycle detected in network. Node has been visited multiple times."
-              );
-            }
-            nodeValues.set(item.node.id, item.value);
-            return item;
-          }
-        );
-        raisedNodes.clear();
-        nodes.forEach(function Network_drainNodes_process({ value, node }) {
-          if (self.status === NETWORK_OFFLINE) return;
-          debug("Network.drainNodes.process", node.id, value);
-          node.traverseChildren((c) => c.fire(value));
-        });
-      }
-      if (self.status === NETWORK_OFFLINE) return;
-      if (raisedNodes.size === 0 && raisedMultiNodes.size > 0) {
-        flushMultiNodes();
-      }
-    }
+  function propagateToChildren(node, value) {
+    nodeValues.set(node.id, value);
+    node.traverseChildren((c) => c.fire(value));
   }
 
   function evaluate(timestamp) {
-    debug("Network.evaluate");
     self.timestamp = timestamp;
-    if (self.status === NETWORK_OFFLINE) return;
+    debug("Network.evaluate");
     self.status = NETWORK_EVALUATING;
-    drainNodes();
-    if (self.status === NETWORK_OFFLINE) return;
+    flushInputs();
+    drainMultiNodes();
+    flushLatchWrites();
+    self.status = NETWORK_EMITTING;
+    flushOutputs();
+    debug("Network.evaluate - done");
+    self.status = NETWORK_STANDBY;
+  }
+
+  function flushInputs() {
+    if (self.status === NETWORK_OFFLINE || raisedInputs.size == 0) return;
+    traverse(
+      raisedInputs.values(),
+      function Network_flushInputs_flushInput({ value, input }) {
+        if (self.status === NETWORK_OFFLINE) return;
+        debug("Network.flushInputs", "flushing input", input.id, value);
+        propagateToChildren(input, value);
+      }
+    );
+    raisedInputs.clear();
+  }
+
+  function drainMultiNodes() {
+    while (raisedMultiNodes.size > 0) {
+      const nodes = Array.from(raisedMultiNodes, function ([id, evalMulti]) {
+        debug("Network.flushMultiNodes.process", id);
+        return evalMulti;
+      });
+      raisedMultiNodes.clear();
+      nodes.forEach(function Network_flushMultiNodes_process(evalMulti) {
+        if (self.status === NETWORK_OFFLINE) return;
+        evalMulti(self)();
+      });
+    }
     nodeValues.clear();
+  }
+
+  function flushLatchWrites() {
     traverse(
       latchWrites.values(),
       function Network_evaluate_writeLatch({ value, latch }) {
+        if (self.status === NETWORK_OFFLINE) return;
         debug("Network.writeLatch", latch.id, value);
         latch.write(value);
       }
     );
     latchWrites.clear();
-    self.status = NETWORK_EMITTING;
+  }
+
+  function flushOutputs() {
+    if (self.status === NETWORK_OFFLINE || raisedOutputs.size == 0) return;
     traverse(raisedOutputs.entries(), function ([id, { value, sink }]) {
       debug("Network.emit", id, value);
       sink(value);
     });
     raisedOutputs.clear();
-    debug("Network.evaluate - done");
-    self.status = NETWORK_STANDBY;
   }
 
   function newNode(makeNode) {
@@ -318,16 +286,10 @@ function Network(Just, Nothing, scheduler) {
 
   self.empty = new EventTarget();
   self.empty.id = nextNodeId++;
-  self.empty.outputs = new Map();
-  self.empty.inputs = new Map();
-  self.empty.parents = new Map();
-  self.empty.children = new Map();
   self.empty.traverseChildren = function Network_empty_traverseChildren() {};
   self.empty.traverseParents = function Network_empty_traverseParents() {};
   self.empty.addInput = function Network_empty_addInput() {};
-  self.empty.addOutput = function Network_empty_addOutput() {};
   self.empty.removeInput = function Network_empty_removeInput() {};
-  self.empty.removeOutput = function Network_empty_removeOutput() {};
   self.empty.addParent = function Network_empty_addParent() {};
   self.empty.removeParent = function Network_empty_removeParent() {};
   self.empty.addChild = function Network_empty_addChild() {};
@@ -351,19 +313,19 @@ function Network(Just, Nothing, scheduler) {
   self.newInput = function Network_newInput() {
     debug("Network.newInput");
     return newNode(function Network_newInput_makeNode(id) {
-      return InputNode(id, function Network_newInput_fire(value, node) {
+      return InputNode(id, function Network_newInput_fire(value, input) {
         switch (self.status) {
           case NETWORK_STANDBY:
             self.status = NETWORK_SCHEDULED;
-            raisedNodes.set(id, { value, node });
+            raisedInputs.set(id, { value, input });
             scheduler.schedule(evaluate);
             break;
           case NETWORK_SCHEDULED:
-            raisedNodes.set(id, { value, node });
+            raisedInputs.set(id, { value, input });
             break;
           case NETWORK_EVALUATING:
           case NETWORK_EMITTING:
-            scheduler.schedule(() => node.fire(value));
+            scheduler.schedule(() => input.fire(value));
             break;
         }
       });
@@ -392,7 +354,7 @@ function Network(Just, Nothing, scheduler) {
         function Network_newLatch_fire(value, node) {
           switch (self.status) {
             case NETWORK_EVALUATING:
-              raisedNodes.set(id, { value, node });
+              propagateToChildren(node, value);
               latchWrites.set(id, { value, latch: node });
               break;
           }
@@ -408,7 +370,7 @@ function Network(Just, Nothing, scheduler) {
         switch (self.status) {
           case NETWORK_EVALUATING:
             const outValue = execute(inValue)(self)();
-            raisedNodes.set(id, { value: outValue, node });
+            propagateToChildren(node, outValue);
             break;
         }
       });
@@ -419,16 +381,19 @@ function Network(Just, Nothing, scheduler) {
     debug("Network.newProcess");
     return newNode(function Network_newProcess_makeNode(id) {
       return Node(id, function Network_newProcess_fire(inValue, node) {
+        debug("Network.newProcess.fire", node.id, inValue);
         switch (self.status) {
           case NETWORK_EVALUATING:
-            function Network_newProcess_raise(outValue) {
-              return function Network_newProcess_raise_raff(network) {
-                return function Network_newProcess_raise_eff() {
-                  raisedNodes.set(id, { value: outValue, node });
+            function Network_newProcess_write(outValue) {
+              debug("Network.newProcess.fire.write", node.id, outValue);
+              return function Network_newProcess_write_raff(network) {
+                return function Network_newProcess_write_eff() {
+                  debug("Network.newProcess.fire.eff", node.id, outValue);
+                  propagateToChildren(node, outValue);
                 };
               };
             }
-            evalNode(node)(inValue)(Network_newProcess_raise)(self)();
+            evalNode(node)(Network_newProcess_write)(inValue)(self)();
             break;
         }
       });
@@ -442,7 +407,7 @@ function Network(Just, Nothing, scheduler) {
     Object.entries(inputs).forEach(function ([k, inNode]) {
       function Network_newMulti_readInput_raff(network) {
         return function Network_newMulti_readInput_eff() {
-          return self.readNode(inNode.id);
+          return network.readNode(inNode.id);
         };
       }
       inputReads[k] = Network_newMulti_readInput_raff;
@@ -491,7 +456,7 @@ function Network(Just, Nothing, scheduler) {
       self.status = NETWORK_OFFLINE;
       self.timestamp = Number.NEGATIVE_INFINITY;
       self.dispatchEvent(new Event("deactivated"));
-      raisedNodes.clear();
+      raisedInputs.clear();
       raisedMultiNodes.clear();
       latchWrites.clear();
       nodeValues.clear();
@@ -508,7 +473,7 @@ function Network(Just, Nothing, scheduler) {
       case NETWORK_SCHEDULED:
         self.status = NETWORK_SUSPENDED;
         self.dispatchEvent(new Event("suspended"));
-        raisedNodes.clear();
+        raisedInputs.clear();
         raisedOutputs.clear();
         break;
       default:
@@ -653,6 +618,14 @@ exports.suspend = function suspend(network) {
   return network.suspend;
 };
 
+exports._readNode = function readNode(node) {
+  return function readNode_raff(network) {
+    return function readNode_eff() {
+      return network.readNode(node.id);
+    };
+  };
+};
+
 exports.readLatch = function readLatch(latch) {
   return function readLatch_raff() {
     return function readLatch_eff() {
@@ -680,10 +653,8 @@ exports.cached = function cached(raff) {
   return function cached_raff(network) {
     return function cached_eff() {
       if (!result.hasOwnProperty("value")) {
-        debug("Running cached raff", raff);
         result.value = raff(network)();
       }
-      debug("Retrning cached raff result", result.value);
       return result.value;
     };
   };

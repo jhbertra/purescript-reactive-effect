@@ -45,6 +45,7 @@ module Effect.Reactive.Internal
   , emptyNode
   , networkTime
   , readLatch
+  , readNode
   ) where
 
 import Prelude
@@ -94,7 +95,7 @@ foreign import data OutputNode :: Timeline -> Type -> Type
 foreign import data LatchNode :: Timeline -> Type -> Type
 
 type EvalProcess t a b =
-  ProcessNode t a b -> a -> (b -> Raff t Unit) -> Raff t Unit
+  ProcessNode t a b -> (b -> Raff t Unit) -> a -> Raff t Unit
 
 type EvalMulti t ri riRead ro roWrite =
   MultiNode t ri ro -> { | riRead } -> { | roWrite } -> Raff t Unit
@@ -300,7 +301,11 @@ foreign import deactivate :: forall t. Raff t Unit
 foreign import resume :: forall t. Raff t Unit
 foreign import suspend :: forall t. Raff t Unit
 foreign import readLatch :: forall t a. LatchNode t a -> Raff t a
+foreign import _readNode :: forall t a b. Node t a b -> Raff t (Maybe b)
 foreign import networkTime :: forall t. Raff t (Time t)
+
+readNode :: forall t a b node. IsNode t a b node => node -> Raff t (Maybe b)
+readNode = _readNode <<< toNode
 
 newMulti
   :: forall t rli ri riRead rlo ro roWrite

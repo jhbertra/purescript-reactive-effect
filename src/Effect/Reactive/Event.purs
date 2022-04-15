@@ -15,10 +15,11 @@ import Control.Alt (class Alt, (<|>))
 import Control.Plus (class Plus, empty)
 import Data.Align (class Align, class Alignable, align)
 import Data.Compactable (class Compactable)
-import Data.Either (Either(..), hush)
+import Data.Either (Either(..))
 import Data.Exists (Exists, mkExists, runExists)
-import Data.Filterable (class Filterable, filter, filterMap)
+import Data.Filterable (class Filterable)
 import Data.Foldable (traverse_)
+import Data.Maybe (Maybe(..))
 import Data.These (these)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
@@ -29,6 +30,7 @@ import Effect.Reactive.Internal
   , ParentNode
   , Raff
   , addChild
+  , addParent
   , cached
   , emptyNode
   , fire
@@ -41,16 +43,23 @@ import Effect.Reactive.Internal
   , newOutput
   , newProcess
   , readLatch
+  , readNode
   , removeChild
+  , removeParent
   , toParent
   )
 import Effect.Reactive.Types (Time)
+import Effect.Ref as Ref
 
 newtype Event t a = Event (Raff t (Exists (ParentNode t a)))
 type EventIO t a = { event :: Event t a, fire :: a -> Raff t Unit }
 
 mkEvent :: forall t a b node. IsParent t a b node => Raff t node -> Event t a
 mkEvent = Event <<< map (mkExists <<< toParent) <<< cached
+
+mkEventNotCached
+  :: forall t a b node. IsParent t a b node => Raff t node -> Event t a
+mkEventNotCached = Event <<< map (mkExists <<< toParent)
 
 runEvent
   :: forall t a r
@@ -61,57 +70,86 @@ runEvent f (Event ra) = ra >>= \na -> runExists f na
 
 instance Functor (Event t) where
   map f = map mkEvent $ runEvent \nodeA -> do
-    nodeB <- newProcess \_ a write -> write $ f $ a
+    nodeB <- newProcess \_ -> (_ <<< f)
     nodeA `addChild` nodeB
     pure nodeB
 
 instance Compactable (Event t) where
   compact = map mkEvent $ runEvent \nodeMa -> do
-    nodeA <- newProcess \_ ma write -> traverse_ write ma
+    nodeA <- newProcess \_ -> traverse_
     nodeMa `addChild` nodeA
     pure nodeA
   separate event =
-    { left: mkEvent $ runEvent
-        ( \nodeMab -> do
-            nodeA <- newProcess \_ mab write -> case mab of
-              Left a -> write a
-              _ -> pure unit
-            nodeMab `addChild` nodeA
-            pure nodeA
+    let
+      mMulti = runEvent
+        ( \eitherN -> cached do
+            left <- newBuffer
+            right <- newBuffer
+            _ <- newMulti { eitherN } { left, right } \_ inputs outputs ->
+              do
+                eitherAB <- inputs.eitherN
+                case eitherAB of
+                  Just (Left a) -> outputs.left a
+                  Just (Right b) -> outputs.right b
+                  _ -> pure unit
+            pure { left, right }
         )
         event
-    , right: mkEvent $ runEvent
-        ( \nodeMab -> do
-            nodeB <- newProcess \_ mab write -> case mab of
-              Right b -> write b
-              _ -> pure unit
-            nodeMab `addChild` nodeB
-            pure nodeB
-        )
-        event
-    }
+    in
+      { left: mkEventNotCached $ _.left <$> mMulti
+      , right: mkEventNotCached $ _.right <$> mMulti
+      }
 
 instance Filterable (Event t) where
   filter p = map mkEvent $ runEvent \nodeMa -> do
-    nodeA <- newProcess \_ a write -> when (p a) $ write a
+    nodeA <- newProcess \_ write a -> when (p a) $ write a
     nodeMa `addChild` nodeA
     pure nodeA
-  partition p e =
-    { yes: filter p e
-    , no: filter (not <<< p) e
-    }
+  partition p event =
+    let
+      mMulti = runEvent
+        ( \nodeA -> cached do
+            no <- newBuffer
+            yes <- newBuffer
+            _ <- newMulti { a: nodeA } { no, yes } \_ inputs outputs ->
+              do
+                ma <- inputs.a
+                case ma of
+                  Just a
+                    | p a -> outputs.yes a
+                    | otherwise -> outputs.no a
+                  _ -> pure unit
+            pure { no, yes }
+        )
+        event
+    in
+      { no: mkEventNotCached $ _.no <$> mMulti
+      , yes: mkEventNotCached $ _.yes <$> mMulti
+      }
   filterMap f = map mkEvent $ runEvent \nodeMa -> do
-    nodeA <- newProcess \_ a write -> traverse_ write $ f a
+    nodeA <- newProcess \_ write -> traverse_ write <<< f
     nodeMa `addChild` nodeA
     pure nodeA
-  partitionMap f e =
-    { left: filterMap (hush <<< swapEither <<< f) e
-    , right: filterMap (hush <<< f) e
-    }
-    where
-    swapEither = case _ of
-      Left x -> Right x
-      Right y -> Left y
+  partitionMap f event =
+    let
+      mMulti = runEvent
+        ( \nodeA -> cached do
+            left <- newBuffer
+            right <- newBuffer
+            _ <- newMulti { a: nodeA } { left, right } \_ inputs outputs ->
+              do
+                ma <- inputs.a
+                case f <$> ma of
+                  Just (Left a) -> outputs.left a
+                  Just (Right b) -> outputs.right b
+                  _ -> pure unit
+            pure { left, right }
+        )
+        event
+    in
+      { left: mkEventNotCached $ _.left <$> mMulti
+      , right: mkEventNotCached $ _.right <$> mMulti
+      }
 
 instance Alt (Event t) where
   alt ea eb = mkEvent $ runEvent
@@ -200,7 +238,7 @@ withTime = executeMap \a -> Tuple <$> networkTime <@> a
 scanE :: forall t m a. MonadRaff t m => a -> Event t (a -> a) -> m (Event t a)
 scanE seed = map liftRaff $ runEvent \nodeF -> do
   latch <- newLatch seed
-  process <- newProcess \_ f write -> do
+  process <- newProcess \_ write f -> do
     a <- readLatch latch
     write $ f a
   nodeF `addChild` process
