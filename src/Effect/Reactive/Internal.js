@@ -74,6 +74,7 @@ function Node(id, fire) {
   debug("Node", id);
   const self = new EventTarget();
   const inputs = new Map();
+  const outputs = new Map();
   const parents = new Map();
   const children = new Map();
 
@@ -88,10 +89,10 @@ function Node(id, fire) {
   };
 
   function isConnected() {
-    return inputs.size > 0;
+    return inputs.size > 0 && outputs.size > 0;
   }
 
-  function updateInputs(f) {
+  function updateIO(f) {
     const connectedBefore = isConnected();
     f();
     const connectedAfter = isConnected();
@@ -104,7 +105,7 @@ function Node(id, fire) {
 
   self.addInput = function Node_addInput(input) {
     debug("Node.addInput", self.id, input);
-    updateInputs(function () {
+    updateIO(function () {
       const count = inputs.get(input) || 0;
       inputs.set(input, count + 1);
       self.traverseChildren((c) => c.addInput(input));
@@ -112,7 +113,7 @@ function Node(id, fire) {
   };
 
   self.removeInput = function Node_removeInput(id) {
-    updateInputs(function () {
+    updateIO(function () {
       const count = inputs.get(id);
       if (count) {
         const newCount = count - 1;
@@ -126,11 +127,36 @@ function Node(id, fire) {
     });
   };
 
+  self.addOutput = function Node_addOutput(output) {
+    debug("Node.addOutput", self.id, output);
+    updateIO(function () {
+      const count = outputs.get(output) || 0;
+      outputs.set(output, count + 1);
+      self.traverseParents((p) => p.addOutput(output));
+    });
+  };
+
+  self.removeOutput = function Node_removeOutput(id) {
+    updateIO(function () {
+      const count = outputs.get(id);
+      if (count) {
+        const newCount = count - 1;
+        if (newCount) {
+          outputs.set(id, count + 1);
+        } else {
+          outputs.delete(id);
+        }
+        self.traverseParents((p) => p.removeOutput(id));
+      }
+    });
+  };
+
   self.addParent = function Node_addParent(parent) {
     if (parents.has(parent.id)) return;
     debug("Node.addParent", self.id, parent.id);
     parents.set(parent.id, parent);
     parent.addChild(self);
+    traverse(outputs.keys(), parent.addOutput);
   };
 
   self.removeParent = function Node_removeParent(parent) {
@@ -170,6 +196,7 @@ function InputNode(id, fire) {
 
 function OutputNode(id, fire) {
   const self = Node(id, fire);
+  self.addOutput(self.id);
   delete self.addChild;
   delete self.removeChild;
   return self;
