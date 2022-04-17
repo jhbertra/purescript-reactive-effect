@@ -24,6 +24,9 @@ function AnimationFrameScheduler() {
   AnimationFrameScheduler_reset();
   return {
     reset: AnimationFrameScheduler_reset,
+    getScheduleTime: function AnimationFrameScheduler_getScheduleTime() {
+      return performance.now() - offset;
+    },
     schedule: function AnimationFrameScheduler_schedule(task) {
       requestAnimationFrame(function AnimationFrameScheduler_run(timestamp) {
         task(timestamp - offset);
@@ -42,6 +45,12 @@ function TimeoutScheduler() {
   TimeoutScheduler_reset();
   return {
     reset: TimeoutScheduler_reset,
+    getScheduleTime: function TimeoutScheduler_getScheduleTime() {
+      performance.measure(measurement, marker);
+      const [entry] = performance.getEntriesByName(measurement);
+      performance.clearMeasures(measurement);
+      return entry.duration;
+    },
     schedule: function TimeoutScheduler_schedule(task) {
       setTimeout(function TimeoutScheduler_run() {
         performance.measure(measurement, marker);
@@ -180,21 +189,42 @@ function LatchNode(id, initialValue, fire) {
   return self;
 }
 
-function MultiNode(id, inputs, outputs, fire) {
+function Circuit(id, inputs, outputs, fire) {
   const self = Node(id, fire);
   Object.values(inputs).forEach(self.addParent);
   Object.values(outputs).forEach(self.addChild);
   return self;
 }
 
+function Animation(id, scheduler) {
+  const self = new EventTarget();
+  let requestId;
+  self.setAnimation = function Animation_setAnimation(animate) {
+    function Animation_setAnimate_animateFrame() {
+      animate(scheduler.getScheduleTime())();
+      requestId = requestAnimationFrame(Animation_setAnimate_animateFrame);
+    }
+    self.clearAnimation();
+    requestId = requestAnimationFrame(Animation_setAnimate_animateFrame);
+  };
+  self.clearAnimation = function Animation_clearAnimation() {
+    if (requestId) {
+      cancelAnimationFrame(requestId);
+    }
+  };
+  return self;
+}
+
 function Network(Just, Nothing, scheduler) {
   const self = new EventTarget();
   let nextNodeId = 0;
+  let nextAnimationId = 0;
   const latchWrites = new Map();
   const nodeValues = new Map();
   const raisedInputs = new Map();
-  const raisedMultiNodes = new Map();
+  const raisedCircuits = new Map();
   const raisedOutputs = new Map();
+  const animations = new Map();
 
   self.status = NETWORK_OFFLINE;
   self.timestamp = Number.NEGATIVE_INFINITY;
@@ -209,7 +239,7 @@ function Network(Just, Nothing, scheduler) {
     debug("Network.evaluate");
     self.status = NETWORK_EVALUATING;
     flushInputs();
-    drainMultiNodes();
+    evaluateCircuits();
     flushLatchWrites();
     self.status = NETWORK_EMITTING;
     flushOutputs();
@@ -230,16 +260,16 @@ function Network(Just, Nothing, scheduler) {
     raisedInputs.clear();
   }
 
-  function drainMultiNodes() {
-    while (raisedMultiNodes.size > 0) {
-      const nodes = Array.from(raisedMultiNodes, function ([id, evalMulti]) {
-        debug("Network.flushMultiNodes.process", id);
-        return evalMulti;
+  function evaluateCircuits() {
+    while (raisedCircuits.size > 0) {
+      const nodes = Array.from(raisedCircuits, function ([id, evalCircuit]) {
+        debug("Network.evaluateCircuits.process", id);
+        return evalCircuit;
       });
-      raisedMultiNodes.clear();
-      nodes.forEach(function Network_flushMultiNodes_process(evalMulti) {
+      raisedCircuits.clear();
+      nodes.forEach(function Network_evaluateCircuits_process(evalCircuit) {
         if (self.status === NETWORK_OFFLINE) return;
-        evalMulti(self)();
+        evalCircuit();
       });
     }
     nodeValues.clear();
@@ -296,6 +326,10 @@ function Network(Just, Nothing, scheduler) {
   self.empty.removeChild = function Network_empty_removeChild() {};
   self.empty.fire = function Network_empty_fire() {};
 
+  self.ground = newNode(function Network_ground_makeNode(id) {
+    return InputNode(id, function Network_ground_fire() {});
+  });
+
   self.newBuffer = function Network_newBuffer() {
     debug("Network.newBuffer");
     return newNode(function Network_newBuffer_makeNode(id) {
@@ -345,6 +379,26 @@ function Network(Just, Nothing, scheduler) {
     });
   };
 
+  self.newAnimation = function Network_newAnimation() {
+    debug("Network.newAnimation");
+    const animation = Animation(nextAnimationId++, scheduler);
+    return {
+      setAnimation: function Network_newAnimation_setAnimation(animate) {
+        if (
+          self.status !== NETWORK_OFFLINE &&
+          self.status !== NETWORK_SUSPENDED
+        ) {
+          animation.setAnimation(animate);
+        }
+        animations.set(animation.id, { animation, animate });
+      },
+      clearAnimation: function Network_newAnimation_clearAnimation() {
+        animation.clearAnimation();
+        animations.delete(animation.id);
+      },
+    };
+  };
+
   self.newLatch = function Network_newLatch(initialValue) {
     debug("Network.newLatch");
     return newNode(function Network_newLatch_makeNode(id) {
@@ -377,63 +431,58 @@ function Network(Just, Nothing, scheduler) {
     });
   };
 
-  self.newProcess = function Network_newProcess(evalNode) {
+  self.newProcess = function Network_newProcess(evalProcess) {
     debug("Network.newProcess");
     return newNode(function Network_newProcess_makeNode(id) {
       return Node(id, function Network_newProcess_fire(inValue, node) {
-        debug("Network.newProcess.fire", node.id, inValue);
         switch (self.status) {
           case NETWORK_EVALUATING:
             function Network_newProcess_write(outValue) {
-              debug("Network.newProcess.fire.write", node.id, outValue);
               return function Network_newProcess_write_raff(network) {
                 return function Network_newProcess_write_eff() {
-                  debug("Network.newProcess.fire.eff", node.id, outValue);
                   propagateToChildren(node, outValue);
                 };
               };
             }
-            evalNode(node)(Network_newProcess_write)(inValue)(self)();
+            evalProcess(Network_newProcess_write)(inValue)(self)();
             break;
         }
       });
     });
   };
 
-  self.newMulti = function Network_newMulti(inputs, outputs, evalMulti) {
-    debug("Network.newMulti");
+  self.newCircuit = function Network_newCircuit(inputs, outputs, evalCircuit) {
+    debug("Network.newCircuit");
     const inputReads = {};
     const outputWrites = {};
     Object.entries(inputs).forEach(function ([k, inNode]) {
-      function Network_newMulti_readInput_raff(network) {
-        return function Network_newMulti_readInput_eff() {
+      function Network_newCircuit_readInput_raff(network) {
+        return function Network_newCircuit_readInput_eff() {
           return network.readNode(inNode.id);
         };
       }
-      inputReads[k] = Network_newMulti_readInput_raff;
+      inputReads[k] = Network_newCircuit_readInput_raff;
     });
     Object.entries(outputs).forEach(function ([k, outNode]) {
-      function Network_newMulti_writeOutput(value) {
-        return function Network_newMulti_writeOutput_raff(network) {
-          return function Network_newMulti_writeOutput_eff() {
+      function Network_newCircuit_writeOutput(value) {
+        return function Network_newCircuit_writeOutput_raff(network) {
+          return function Network_newCircuit_writeOutput_eff() {
             outNode.fire(value);
           };
         };
       }
-      outputWrites[k] = Network_newMulti_writeOutput;
+      outputWrites[k] = Network_newCircuit_writeOutput;
     });
-    return newNode(function Network_newMulti_makeNode(id) {
-      return MultiNode(
+    const evalCircuitEff = evalCircuit(inputReads)(outputWrites)(self);
+    return newNode(function Network_newCircuit_makeNode(id) {
+      return Circuit(
         id,
         inputs,
         outputs,
-        function Network_newMulti_fire(_, node) {
+        function Network_newCircuit_fire(_, node) {
           switch (self.status) {
             case NETWORK_EVALUATING:
-              raisedMultiNodes.set(
-                id,
-                evalMulti(node)(inputReads)(outputWrites)
-              );
+              raisedCircuits.set(id, evalCircuitEff);
               break;
           }
         }
@@ -448,6 +497,12 @@ function Network(Just, Nothing, scheduler) {
       self.timestamp = 0;
       self.status = NETWORK_STANDBY;
       self.dispatchEvent(new Event("actuated"));
+      traverse(
+        animations.values(),
+        function stopAnimation({ animation, animate }) {
+          animation.setAnimation(animate);
+        }
+      );
     }
   };
 
@@ -457,10 +512,14 @@ function Network(Just, Nothing, scheduler) {
       self.timestamp = Number.NEGATIVE_INFINITY;
       self.dispatchEvent(new Event("deactivated"));
       raisedInputs.clear();
-      raisedMultiNodes.clear();
+      raisedCircuits.clear();
       latchWrites.clear();
       nodeValues.clear();
       raisedOutputs.clear();
+      traverse(animations.values(), function stopAnimation({ animation }) {
+        animation.clearAnimation();
+      });
+      animations.clear();
     }
   };
 
@@ -475,6 +534,9 @@ function Network(Just, Nothing, scheduler) {
         self.dispatchEvent(new Event("suspended"));
         raisedInputs.clear();
         raisedOutputs.clear();
+        traverse(animations.values(), function stopAnimation({ animation }) {
+          animation.clearAnimation();
+        });
         break;
       default:
         scheduler.schedule(self.suspend);
@@ -486,6 +548,12 @@ function Network(Just, Nothing, scheduler) {
     if (self.status === NETWORK_SUSPENDED) {
       self.status = NETWORK_STANDBY;
       self.dispatchEvent(new Event("resumed"));
+      traverse(
+        animations.values(),
+        function stopAnimation({ animation, animate }) {
+          animation.setAnimation(animate);
+        }
+      );
     }
   };
 
@@ -548,12 +616,22 @@ exports._withNetwork = function withNetwork(Just, Nothing, scheduler, eff) {
   return eff(network)();
 };
 
+exports.ground = function ground(network) {
+  return function () {
+    return network.ground;
+  };
+};
+
 exports.newInput = function newInput(network) {
   return network.newInput;
 };
 
 exports.newBuffer = function newBuffer(network) {
   return network.newBuffer;
+};
+
+exports.newAnimation = function newAnimation(network) {
+  return network.newAnimation;
 };
 
 exports.emptyNode = function emptyNode(network) {
@@ -578,10 +656,10 @@ exports.newLatch = function newLatch(initialValue) {
   };
 };
 
-exports.newProcess = function newProcess(evalNode) {
+exports.newProcess = function newProcess(evalProcess) {
   return function newProcess_raff(network) {
     return function newProcess_eff() {
-      return network.newProcess(evalNode);
+      return network.newProcess(evalProcess);
     };
   };
 };
@@ -594,10 +672,10 @@ exports.newExecute = function newExecute(execute) {
   };
 };
 
-exports._newMulti = function newMulti(inputs, outputs, evalMulti) {
-  return function newMulti_raff(network) {
-    return function newMulti_eff() {
-      return network.newMulti(inputs, outputs, evalMulti);
+exports._newCircuit = function newCircuit(inputs, outputs, evalCircuit) {
+  return function newCircuit_raff(network) {
+    return function newCircuit_eff() {
+      return network.newCircuit(inputs, outputs, evalCircuit);
     };
   };
 };
@@ -637,6 +715,15 @@ exports.readLatch = function readLatch(latch) {
 exports.networkTime = function networkTime(network) {
   return function networkTime_eff() {
     return network.timestamp;
+  };
+};
+
+// Animation API
+
+exports._setAnimation = function setAnimation(animation, animate) {
+  animation.setAnimation(animate);
+  return function clearAnimation() {
+    animation.clearAnimation();
   };
 };
 

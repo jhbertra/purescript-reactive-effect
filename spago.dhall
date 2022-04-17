@@ -47,6 +47,9 @@
   , "unlift"
   , "unordered-collections"
   , "unsafe-coerce"
+  , "web-dom"
+  , "web-events"
+  , "web-html"
   ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs" ]

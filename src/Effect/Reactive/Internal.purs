@@ -4,48 +4,51 @@ module Effect.Reactive.Internal
   , class IsParent
   , class InputRow
   , class OutputRow
-  , Scheduler
-  , Node
-  , EvalProcess
-  , ChildNode
-  , ParentNode
-  , MultiNode
-  , InputNode
+  , Animation
   , BufferNode
-  , ProcessNode
-  , OutputNode
+  , ChildNode
+  , EvalProcess
+  , InputNode
   , LatchNode
   , Network
+  , Node
+  , OutputNode
+  , ParentNode
+  , ProcessNode
   , Raff
-  , withNetwork
-  , timeoutScheduler
-  , animationFrameScheduler
-  , runRaff
-  , addParent
-  , removeParent
+  , Scheduler
+  , actuate
   , addChild
+  , addParent
+  , animationFrameScheduler
+  , cached
+  , deactivate
+  , emptyNode
+  , fire
+  , ground
+  , networkTime
+  , newAnimation
+  , newBuffer
+  , newCircuit
+  , newExecute
+  , newInput
+  , newLatch
+  , newOutput
+  , newProcess
+  , onConnected
+  , readLatch
+  , readNode
   , removeChild
+  , removeParent
+  , resume
+  , runRaff
+  , suspend
+  , timeoutScheduler
   , toChild
   , toNode
   , toParent
-  , onConnected
-  , newInput
-  , newBuffer
-  , newOutput
-  , newLatch
-  , newExecute
-  , newProcess
-  , newMulti
-  , actuate
-  , deactivate
-  , resume
-  , suspend
-  , fire
-  , cached
-  , emptyNode
-  , networkTime
-  , readLatch
-  , readNode
+  , withNetwork
+  , setAnimation
   ) where
 
 import Prelude
@@ -76,9 +79,9 @@ import Unsafe.Coerce (unsafeCoerce)
 
 foreign import data Network :: Timeline -> Type
 
-foreign import data Node :: Timeline -> Type -> Type -> Type
+foreign import data Animation :: Timeline -> Type -> Type
 
-foreign import data MultiNode :: Timeline -> Row Type -> Row Type -> Type
+foreign import data Node :: Timeline -> Type -> Type -> Type
 
 foreign import data ProcessNode :: Timeline -> Type -> Type -> Type
 
@@ -94,20 +97,16 @@ foreign import data OutputNode :: Timeline -> Type -> Type
 
 foreign import data LatchNode :: Timeline -> Type -> Type
 
-type EvalProcess t a b =
-  ProcessNode t a b -> (b -> Raff t Unit) -> a -> Raff t Unit
+type EvalProcess t a b = (b -> Raff t Unit) -> a -> Raff t Unit
 
-type EvalMulti t ri riRead ro roWrite =
-  MultiNode t ri ro -> { | riRead } -> { | roWrite } -> Raff t Unit
+type EvalCircuit t riRead roWrite =
+  { | riRead } -> { | roWrite } -> Raff t Unit
 
 class IsNode t a b n | n -> t a b where
   toNode :: n -> Node t a b
 
 instance IsNode t a b (Node t a b) where
   toNode = identity
-
-instance IsNode t Unit Unit (MultiNode ri ro b) where
-  toNode = unsafeCoerce
 
 instance IsNode t a a (InputNode t a) where
   toNode = unsafeCoerce
@@ -136,9 +135,6 @@ class IsNode t b a n <= IsParent t a b n | n -> t a b where
 instance IsParent t a b (ParentNode t a b) where
   toParent = identity
 
-instance IsParent t Unit Unit (MultiNode ri ro b) where
-  toParent = unsafeCoerce
-
 instance IsParent t a a (InputNode t a) where
   toParent = unsafeCoerce
 
@@ -156,9 +152,6 @@ class IsNode t a b n <= IsChild t a b n | n -> t a b where
 
 instance IsChild t a b (ChildNode t a b) where
   toChild = identity
-
-instance IsChild t Unit Unit (MultiNode ri ro b) where
-  toChild = unsafeCoerce
 
 instance IsChild t a a (OutputNode t a) where
   toChild = unsafeCoerce
@@ -231,6 +224,17 @@ foreign import _fire :: forall t a. EffectFn2 a (InputNode t a) Unit
 foreign import _onConnected
   :: forall t a b. EffectFn2 (Node t a b) (Effect (Effect Unit)) (Effect Unit)
 
+foreign import _setAnimation
+  :: forall t a
+   . EffectFn2 (Animation t a) (Time t -> Effect Unit) (Effect Unit)
+
+setAnimation
+  :: forall t a
+   . Animation t a
+  -> (Time t -> Effect Unit)
+  -> Effect (Effect Unit)
+setAnimation = runEffectFn2 _setAnimation
+
 addParent
   :: forall t x y z c p
    . IsChild t y z c
@@ -275,12 +279,18 @@ fire :: forall t a. a -> InputNode t a -> Raff t Unit
 fire a = liftEffect <<< runEffectFn2 _fire a
 
 onConnected
-  :: forall t a b. Node t a b -> Effect (Effect Unit) -> Effect (Effect Unit)
-onConnected = runEffectFn2 _onConnected
+  :: forall t a b node
+   . IsNode t a b node
+  => node
+  -> Effect (Effect Unit)
+  -> Raff t (Effect Unit)
+onConnected node = liftEffect <<< runEffectFn2 _onConnected (toNode node)
 
 foreign import newInput :: forall t a. Raff t (InputNode t a)
 foreign import emptyNode :: forall t a. Raff t (BufferNode t a)
+foreign import ground :: forall t a. Raff t (InputNode t a)
 foreign import newBuffer :: forall t a. Raff t (BufferNode t a)
+foreign import newAnimation :: forall t a. Raff t (Animation t a)
 foreign import newOutput
   :: forall t a. (a -> Effect Unit) -> Raff t (OutputNode t a)
 
@@ -291,10 +301,9 @@ foreign import newProcess
 foreign import newExecute
   :: forall t a b. (a -> Raff t b) -> Raff t (ProcessNode t a b)
 
-foreign import _newMulti
+foreign import _newCircuit
   :: forall t ri riRead ro roWrite
-   . Fn3 { | ri } { | ro } (EvalMulti t ri riRead ro roWrite)
-       (Raff t (MultiNode t ri ro))
+   . Fn3 { | ri } { | ro } (EvalCircuit t riRead roWrite) (Raff t Unit)
 
 foreign import actuate :: forall t. Raff t Unit
 foreign import deactivate :: forall t. Raff t Unit
@@ -307,7 +316,7 @@ foreign import networkTime :: forall t. Raff t (Time t)
 readNode :: forall t a b node. IsNode t a b node => node -> Raff t (Maybe b)
 readNode = _readNode <<< toNode
 
-newMulti
+newCircuit
   :: forall t rli ri riRead rlo ro roWrite
    . RowToList ri rli
   => RowToList ro rlo
@@ -315,9 +324,9 @@ newMulti
   => OutputRow t ro roWrite rlo
   => { | ri }
   -> { | ro }
-  -> EvalMulti t ri riRead ro roWrite
-  -> Raff t (MultiNode t ri ro)
-newMulti = runFn3 _newMulti
+  -> EvalCircuit t riRead roWrite
+  -> Raff t Unit
+newCircuit = runFn3 _newCircuit
 
 class InputRow :: Timeline -> Row Type -> Row Type -> RowList Type -> Constraint
 class InputRow t r rRead rl | rl -> r rRead t
