@@ -17,10 +17,11 @@ module Effect.Reactive.Internal
   , ProcessNode
   , Raff
   , Scheduler
+  , TestScheduler
   , actuate
   , addChild
   , addParent
-  , animationFrameScheduler
+  , newAnimationFrameScheduler
   , cached
   , deactivate
   , emptyNode
@@ -37,16 +38,19 @@ module Effect.Reactive.Internal
   , newProcess
   , onConnected
   , readLatch
+  , readLatchEarly
   , readNode
   , removeChild
   , removeParent
   , resume
   , runRaff
+  , testRaff
   , suspend
-  , timeoutScheduler
+  , newTimeoutScheduler
   , toChild
   , toNode
   , toParent
+  , toScheduler
   , withNetwork
   , setAnimation
   ) where
@@ -64,7 +68,7 @@ import Control.Monad.Reader
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Unlift (class MonadUnlift)
 import Data.Function.Uncurried (Fn3, runFn3)
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), maybe)
 import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (Error)
@@ -167,15 +171,24 @@ instance IsChild t a b (ProcessNode t a b) where
 
 foreign import data Scheduler :: Type
 
+foreign import data TestScheduler :: Type
+
 foreign import _withNetwork
   :: forall r
    . EffectFn4 (forall a. a -> Maybe a) (forall a. Maybe a) Scheduler
        (forall t. Network t -> Effect r)
        r
 
-foreign import timeoutScheduler :: Scheduler
+foreign import newTimeoutScheduler :: Effect Scheduler
 
-foreign import animationFrameScheduler :: Scheduler
+foreign import newAnimationFrameScheduler :: Effect Scheduler
+
+foreign import newTestScheduler :: Effect TestScheduler
+
+foreign import flushTestScheduler :: TestScheduler -> Effect Unit
+
+toScheduler :: TestScheduler -> Scheduler
+toScheduler = unsafeCoerce
 
 withNetwork
   :: forall r. Scheduler -> (forall t. Network t -> Effect r) -> Effect r
@@ -185,6 +198,13 @@ newtype Raff t a = Raff (ReaderT (Network t) Effect a)
 
 runRaff :: forall t a. Raff t a -> Network t -> Effect a
 runRaff = coerce (runReaderT :: _ (Network t) Effect a -> _ _ -> _ a)
+
+testRaff :: forall a. (forall t. Raff t Unit -> Raff t a) -> Effect a
+testRaff f = do
+  testScheduler <- newTestScheduler
+  withNetwork
+    (toScheduler testScheduler)
+    (runRaff (f (liftEffect $ flushTestScheduler testScheduler)))
 
 derive newtype instance Functor (Raff t)
 derive newtype instance Apply (Raff t)
@@ -312,6 +332,11 @@ foreign import suspend :: forall t. Raff t Unit
 foreign import readLatch :: forall t a. LatchNode t a -> Raff t a
 foreign import _readNode :: forall t a b. Node t a b -> Raff t (Maybe b)
 foreign import networkTime :: forall t. Raff t (Time t)
+
+readLatchEarly :: forall t a. LatchNode t a -> Raff t a
+readLatchEarly latch = do
+  ma <- readNode latch
+  maybe (readLatch latch) pure ma
 
 readNode :: forall t a b node. IsNode t a b node => node -> Raff t (Maybe b)
 readNode = _readNode <<< toNode

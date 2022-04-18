@@ -35,6 +35,29 @@ function AnimationFrameScheduler() {
   };
 }
 
+function TestScheduler() {
+  let time = 0;
+  const queue = [];
+  return {
+    reset: function TestScheduler_reset() {
+      time = 0;
+      queue.splice(0);
+    },
+    getScheduleTime: function TestScheduler_getScheduleTime() {
+      return time;
+    },
+    schedule: function TestScheduler_schedule(task) {
+      queue.unshift(task);
+    },
+    flush: function TestScheduler_flush() {
+      while (queue.length > 0) {
+        queue.pop()(time);
+      }
+      time++;
+    },
+  };
+}
+
 function TimeoutScheduler() {
   const id = nextSchedulerId++;
   const marker = "timeout-schedule-" + id;
@@ -756,9 +779,17 @@ exports._setAnimation = function setAnimation(animation, animate) {
 
 // Scheduler API
 
-exports.timeoutScheduler = TimeoutScheduler();
+exports.newTimeoutScheduler = TimeoutScheduler;
 
-exports.animationFrameScheduler = AnimationFrameScheduler();
+exports.newAnimationFrameScheduler = AnimationFrameScheduler;
+
+exports.newTestScheduler = TestScheduler;
+
+exports.flushTestScheduler = function flushTestScheduler(testScheduler) {
+  return function flushTestScheduler_eff() {
+    testScheduler.flush();
+  };
+};
 
 // Raff API
 

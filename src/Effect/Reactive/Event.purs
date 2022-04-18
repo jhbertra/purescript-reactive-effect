@@ -18,12 +18,15 @@ module Effect.Reactive.Event
   , fromAddListener_
   , fromChanges
   , gate
+  , interpretB
+  , interpretE
   , mapAccum
   , newBehaviour
   , newEvent
   , partitionApply
   , partitionMapApply
   , react
+  , sampleB
   , scanB
   , scanE
   , stepper
@@ -46,11 +49,14 @@ import Data.Compactable (class Compactable, compact, separate)
 import Data.Either (Either(..))
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Filterable (class Filterable)
-import Data.Foldable (traverse_)
+import Data.Foldable (for_, traverse_)
 import Data.HeytingAlgebra (ff, implies, tt)
 import Data.Lazy (force)
+import Data.List (List(..), (:))
+import Data.List as List
 import Data.Maybe (Maybe(..), maybe)
 import Data.These (these)
+import Data.Traversable (for)
 import Data.Traversable.Accum (Accum)
 import Data.Tuple (Tuple(..), snd)
 import Effect (Effect)
@@ -61,9 +67,11 @@ import Effect.Reactive.Internal
   , LatchNode
   , ParentNode
   , Raff
+  , actuate
   , addChild
   , addParent
   , cached
+  , deactivate
   , emptyNode
   , fire
   , ground
@@ -82,6 +90,7 @@ import Effect.Reactive.Internal
   , removeChild
   , removeParent
   , setAnimation
+  , testRaff
   , toParent
   )
 import Effect.Reactive.Types (Time)
@@ -469,7 +478,6 @@ animate (Behaviour rlfa) eff = do
       F f -> do
         clearAnimation <- setAnimation animation $ eff <<< f
         Ref.write clearAnimation clearAnimationRef
-      -- TODO eveluate later!
       L lf -> animateTimeFn $ force lf
   liftEffect <<< animateTimeFn =<< readLatch lfa
   output <- newOutput animateTimeFn
@@ -505,7 +513,6 @@ bracketAnimate (Behaviour rlfa) acquire release eff = do
           mResource <- Ref.read resourceRef
           traverse_ (flip eff (f t)) mResource
         Ref.write clearAnimation clearAnimationRef
-      -- TODO eveluate later!
       L lf -> animateTimeFn $ force lf
   liftEffect <<< animateTimeFn =<< readLatch lfa
   output <- newOutput animateTimeFn
@@ -524,6 +531,10 @@ bracketAnimate (Behaviour rlfa) acquire release eff = do
 
 timeB :: forall t. Behaviour t (Time t)
 timeB = liftTimeFn identity
+
+sampleB :: forall t m a. MonadRaff t m => Behaviour t a -> m a
+sampleB (Behaviour rlfa) =
+  liftRaff $ evalTimeFn <$> (readLatch =<< rlfa) <*> networkTime
 
 stepper :: forall t m a. MonadRaff t m => a -> Event t a -> m (Behaviour t a)
 stepper a = map K >>> runEvent \nodeA -> liftRaff do
@@ -577,7 +588,6 @@ switchMapB
 switchMapB (Behaviour rlfb0) f = runEvent \nodeA -> liftRaff do
   currentRef <- liftEffect $ Ref.new Nothing
   lfb0 <- rlfb0
-  -- TODO read later!
   f0 <- readLatch lfb0
   out <- newLatch f0
   process <- newProcess \write a -> do
@@ -605,7 +615,6 @@ mapAccum seed = runEvent \nodeF -> liftRaff do
   newCircuit { f: nodeF } { accum, value } \inputs outputs -> do
     inputs.f >>= traverse_ \f -> do
       time <- networkTime
-      -- TODO read later!
       acc <- f <<< flip evalTimeFn time <$> readLatch accum
       outputs.accum $ K acc.accum
       outputs.value acc.value
@@ -642,3 +651,43 @@ partitionMapApply
   -> Event t a
   -> { left :: Event t b, right :: Event t c }
 partitionMapApply bp = separate <<< applyE (($) <$> bp)
+
+interpretE
+  :: forall a b
+   . (forall t. Event t a -> Raff t (Event t b))
+  -> List (Maybe a)
+  -> Effect (List (Maybe b))
+interpretE buildNetwork inputs = do
+  resultsRef <- Ref.new Nil
+  testRaff \flushScheduler -> do
+    { event: inputE, fire: fireE } <- newEvent
+    { event: nothingE, fire: fireNothing } <- newEvent
+    outputE <- buildNetwork inputE
+    _ <- react (Just <$> outputE <|> nothingE) $ flip Ref.modify_ resultsRef <<<
+      (:)
+    actuate
+    for_ inputs \input -> do
+      traverse_ fireE input
+      fireNothing Nothing
+      flushScheduler
+    deactivate
+  List.reverse <$> Ref.read resultsRef
+
+interpretB
+  :: forall a b
+   . (forall t. Event t a -> Raff t (Behaviour t b))
+  -> List (Maybe a)
+  -> Effect (List b)
+interpretB buildNetwork inputs = do
+  testRaff \flushScheduler -> do
+    { event: inputE, fire: fireE } <- newEvent
+    { fire: fireAlways } <- newEvent
+    outputB <- buildNetwork inputE
+    actuate
+    outputs <- for inputs \input -> do
+      traverse_ fireE input
+      fireAlways unit
+      flushScheduler
+      sampleB outputB
+    deactivate
+    pure outputs
