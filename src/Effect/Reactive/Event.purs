@@ -19,7 +19,9 @@ module Effect.Reactive.Event
   , fromChanges
   , gate
   , interpretB
+  , interpretB2
   , interpretE
+  , interpretE2
   , mapAccum
   , newBehaviour
   , newEvent
@@ -44,7 +46,7 @@ import Control.Alt (class Alt, (<|>))
 import Control.Apply (lift2)
 import Control.Plus (class Plus, empty)
 import Control.Reactive.TimeFn (TimeFn(..), evalTimeFn)
-import Data.Align (class Align, class Alignable, align)
+import Data.Align (class Align, class Alignable, align, aligned)
 import Data.Compactable (class Compactable, compact, separate)
 import Data.Either (Either(..))
 import Data.Exists (Exists, mkExists, runExists)
@@ -55,7 +57,7 @@ import Data.Lazy (force)
 import Data.List (List(..), (:))
 import Data.List as List
 import Data.Maybe (Maybe(..), maybe)
-import Data.These (these)
+import Data.These (these, theseLeft, theseRight)
 import Data.Traversable (for)
 import Data.Traversable.Accum (Accum)
 import Data.Tuple (Tuple(..), snd)
@@ -326,7 +328,7 @@ executeMap f = map mkEvent $ runEvent \nodeA -> do
   pure $ nodeB
 
 withTime :: forall t a. Event t a -> Event t (Tuple (Time t) a)
-withTime = executeMap \a -> Tuple <$> networkTime <@> a
+withTime a = Tuple <$> timeB <&> a
 
 scanE :: forall t m a. MonadRaff t m => a -> Event t (a -> a) -> m (Event t a)
 scanE seed = runEvent \nodeF -> liftRaff do
@@ -673,6 +675,30 @@ interpretE buildNetwork inputs = do
     deactivate
   List.reverse <$> Ref.read resultsRef
 
+interpretE2
+  :: forall a b c
+   . (forall t. Event t a -> Event t b -> Raff t (Event t c))
+  -> List (Maybe a)
+  -> List (Maybe b)
+  -> Effect (List (Maybe c))
+interpretE2 buildNetwork as bs = do
+  resultsRef <- Ref.new Nil
+  testRaff \flushScheduler -> do
+    { event: inputA, fire: fireA } <- newEvent
+    { event: inputB, fire: fireB } <- newEvent
+    { event: nothingE, fire: fireNothing } <- newEvent
+    outputE <- buildNetwork inputA inputB
+    _ <- react (Just <$> outputE <|> nothingE) $ flip Ref.modify_ resultsRef <<<
+      (:)
+    actuate
+    for_ (aligned as bs) \theseAB -> do
+      traverse_ fireA $ join $ theseLeft theseAB
+      traverse_ fireB $ join $ theseRight theseAB
+      fireNothing Nothing
+      flushScheduler
+    deactivate
+  List.reverse <$> Ref.read resultsRef
+
 interpretB
   :: forall a b
    . (forall t. Event t a -> Raff t (Behaviour t b))
@@ -686,6 +712,28 @@ interpretB buildNetwork inputs = do
     actuate
     outputs <- for inputs \input -> do
       traverse_ fireE input
+      fireAlways unit
+      flushScheduler
+      sampleB outputB
+    deactivate
+    pure outputs
+
+interpretB2
+  :: forall a b c
+   . (forall t. Event t a -> Event t b -> Raff t (Behaviour t c))
+  -> List (Maybe a)
+  -> List (Maybe b)
+  -> Effect (List c)
+interpretB2 buildNetwork as bs = do
+  testRaff \flushScheduler -> do
+    { event: inputA, fire: fireA } <- newEvent
+    { event: inputB, fire: fireB } <- newEvent
+    { fire: fireAlways } <- newEvent
+    outputB <- buildNetwork inputA inputB
+    actuate
+    outputs <- for (aligned as bs) \theseAB -> do
+      traverse_ fireA $ join $ theseLeft theseAB
+      traverse_ fireB $ join $ theseRight theseAB
       fireAlways unit
       flushScheduler
       sampleB outputB
