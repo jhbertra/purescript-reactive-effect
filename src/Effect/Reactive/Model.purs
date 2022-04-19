@@ -4,6 +4,7 @@ import Prelude
 
 import Control.Alt (class Alt, (<|>))
 import Control.Alternative (class Plus)
+import Control.Apply (lift2)
 import Control.Monad.Reader (Reader, ReaderT(..), runReader)
 import Control.Plus (empty)
 import Data.Align (class Align, class Alignable, align)
@@ -76,6 +77,12 @@ instance Apply Behaviour where
 
 instance Applicative Behaviour where
   pure = Behaviour <<< Lazy.repeat
+
+instance Semigroup a => Semigroup (Behaviour a) where
+  append = lift2 append
+
+instance Monoid a => Monoid (Behaviour a) where
+  mempty = pure mempty
 
 interpretE
   :: forall a b

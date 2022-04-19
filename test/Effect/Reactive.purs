@@ -165,6 +165,19 @@ behaviourSpec = describe "Behaviour" do
         ba <- Model.stepper a ea
         pure $ bf <*> ba
     )
+  modelSpec2
+    "append"
+    ( \(a :: String) b ea eb -> do
+        ba <- stepper a ea
+        bb <- stepper b eb
+        pure $ ba <> bb
+    )
+    ( \a b ea eb -> do
+        ba <- Model.stepper a ea
+        bb <- Model.stepper b eb
+        pure $ ba <> bb
+    )
+  modelSpec0 "mempty" (mempty) (mempty :: _ String)
   where
   modelSpec0
     :: forall a
