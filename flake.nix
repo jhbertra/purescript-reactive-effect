@@ -152,7 +152,7 @@
               checkPhase = ''
                 set -e
                 psa compile ${psa-args} ${spagoSources} "./src/**/*.purs" "./test/**/*.purs"
-                node $src/test.js
+                node -e 'require("./output/Test.Main/index").main()'
               '';
             };
 
