@@ -570,7 +570,15 @@ scanB
   => a
   -> Event t (a -> a)
   -> m (Behaviour t a)
-scanB seed = stepper seed <=< scanE seed
+scanB seed = runEvent \nodeF -> liftRaff do
+  latch <- newLatch $ K seed
+  process <- newProcess \write f -> do
+    time <- networkTime
+    fa <- readLatch latch
+    write $ K $ f $ evalTimeFn fa time
+  nodeF `addChild` process
+  process `addChild` latch
+  pure $ pureBehaviour latch
 
 switchB
   :: forall t m a

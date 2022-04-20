@@ -19,6 +19,7 @@ import Effect.Reactive.Event
   , interpretB2
   , interpretE
   , interpretE2
+  , scanB
   , scanE
   , stepper
   , timeB
@@ -183,6 +184,10 @@ behaviourSpec = describe "Behaviour" do
         pure $ ba <> bb
     )
   modelSpec0 "mempty" (mempty) (mempty :: _ String)
+  modelSpec2
+    "scanB"
+    (\(a :: Int) _ _ ef -> scanB a ef)
+    (\a _ _ ef -> Model.scanB a ef)
   where
   modelSpec0
     :: forall a
