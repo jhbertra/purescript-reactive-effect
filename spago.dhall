@@ -6,7 +6,6 @@
   , "arrays"
   , "bifunctors"
   , "catenable-lists"
-  , "console"
   , "control"
   , "datetime"
   , "effect"

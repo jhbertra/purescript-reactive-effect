@@ -1,4 +1,4 @@
-module Control.Reactive.TimeFn where
+module Data.TimeFn where
 
 import Prelude
 
