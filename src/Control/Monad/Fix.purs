@@ -26,6 +26,7 @@ import Prim.RowList as RL
 import Record as Record
 import Record.Builder (Builder)
 import Record.Builder as Builder
+import Safe.Coerce (coerce)
 import Type.Proxy (Proxy(..))
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -51,7 +52,7 @@ instance monadFixRWST ::
       $ case _ of RWSResult _ a _ -> runRWST (f a) r s
 
 instance MonadFix Identity where
-  mfix = Identity <<< fix <<< map unwrap
+  mfix f = Identity $ fix $ coerce f
 
 message :: String
 message =

@@ -10,3 +10,6 @@ generated-docs/
 .direnv
 .envrc
 *.log
+.parcel*
+dist/
+node_modules/

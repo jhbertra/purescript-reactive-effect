@@ -19,6 +19,7 @@ import Effect.Reactive.Event
   , interpretB2
   , interpretE
   , interpretE2
+  , scanE
   , stepper
   , timeB
   )
@@ -40,6 +41,10 @@ eventSpec = describe "Event" do
     "applyB"
     (\(f :: A -> Int) _ ef ea -> applyE <$> stepper f ef <@> ea)
     (\f _ ef ea -> Model.applyE <$> Model.stepper f ef <@> ea)
+  modelSpec2
+    "scanE"
+    (\(a :: Int) _ _ ef -> scanE a ef)
+    (\a _ _ ef -> Model.scanE a ef)
   modelSpec2
     "map"
     (\(f :: A -> Int) _ _ ea -> pure $ f <$> ea)

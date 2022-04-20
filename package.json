@@ -1,0 +1,17 @@
+{
+  "name": "purescript-frp",
+  "version": "1.0.0",
+  "description": "[![Latest release](http://img.shields.io/github/release/jhbertra/purescript-frp.svg)](https://github.com/jhbertra/purescript-frp/releases) [![Build status](https://github.com/jhbertra/purescript-frp/workflows/Build/badge.svg?branch=main)](https://github.com/jhbertra/purescript-frp/actions?query=workflow%3ABuild+branch%3Amain) [![Pursuit](https://pursuit.purescript.org/packages/purescript-frp/badge)](https://pursuit.purescript.org/packages/purescript-frp)",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "parcel": "^2.4.1"
+  }
+}

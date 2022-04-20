@@ -9,7 +9,6 @@
   , "console"
   , "control"
   , "datetime"
-  , "debug"
   , "effect"
   , "either"
   , "enums"
@@ -25,7 +24,6 @@
   , "lazy"
   , "lcg"
   , "lists"
-  , "math"
   , "maybe"
   , "monad-control"
   , "newtype"
@@ -50,10 +48,6 @@
   , "unlift"
   , "unordered-collections"
   , "unsafe-coerce"
-  , "web-dom"
-  , "web-events"
-  , "web-html"
-  , "web-uievents"
   ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs" ]

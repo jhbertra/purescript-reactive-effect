@@ -5,7 +5,9 @@ import Prelude
 import Control.Alt (class Alt, (<|>))
 import Control.Alternative (class Plus)
 import Control.Apply (lift2)
-import Control.Monad.Reader (Reader, ReaderT(..), runReader)
+import Control.Lazy (class Lazy, defer)
+import Control.Lazy.Lazy1 (class Lazy1)
+import Control.Monad.Reader (Reader, ReaderT(..), runReader, runReaderT)
 import Control.Plus (empty)
 import Data.Align (class Align, class Alignable, align)
 import Data.Compactable (class Compactable, separateDefault)
@@ -33,6 +35,11 @@ derive newtype instance Apply Raff
 derive newtype instance Applicative Raff
 derive newtype instance Bind Raff
 derive newtype instance Monad Raff
+instance Lazy (Raff a) where
+  defer f = Raff $ ReaderT \t -> runReaderT (coerce f unit) t
+
+instance Lazy1 Raff where
+  defer1 = defer
 
 newtype Event a = Event (List (Maybe a))
 newtype Behaviour a = Behaviour (List a)
@@ -83,6 +90,18 @@ instance Semigroup a => Semigroup (Behaviour a) where
 
 instance Monoid a => Monoid (Behaviour a) where
   mempty = pure mempty
+
+instance Lazy (Behaviour a) where
+  defer f = Behaviour $ defer $ coerce f
+
+instance Lazy1 Behaviour where
+  defer1 = defer
+
+instance Lazy (Event a) where
+  defer f = Event $ defer $ coerce f
+
+instance Lazy1 Event where
+  defer1 = defer
 
 interpretE
   :: forall a b
@@ -142,6 +161,22 @@ interpretB2 f as bs = Strict.fromFoldable
       (Event $ Strict.toUnfoldable as <> repeat Nothing)
       (Event $ Strict.toUnfoldable bs <> repeat Nothing)
 
+scanE :: forall a. a -> Event (a -> a) -> Raff (Event a)
+scanE i e = Raff $ ReaderT \time ->
+  pure $ Event $ Lazy.replicate time Nothing <> step i (forgetE time e)
+  where
+  step a = over Lazy.List $ map case _ of
+    Lazy.Nil -> Lazy.Nil
+    Lazy.Cons Nothing mas -> Lazy.Cons Nothing $ step a mas
+    Lazy.Cons (Just f) mas ->
+      let
+        next = f a
+      in
+        Lazy.Cons (Just next) $ step next mas
+
+scanB :: forall a. a -> Event (a -> a) -> Raff (Behaviour a)
+scanB a = stepper a <=< scanE a
+
 timeB :: Behaviour Time
 timeB = Behaviour $ Lazy.iterate (_ + 1) 0
 
@@ -152,15 +187,13 @@ stepper :: forall a. a -> Event a -> Raff (Behaviour a)
 stepper i e = Raff $ ReaderT \time ->
   pure $ Behaviour $ Lazy.replicate time i <> step i (forgetE time e)
   where
-  step a (Lazy.List lstep) = lstep
-    # map case _ of
-        Lazy.Nil -> Lazy.Nil
-        Lazy.Cons ma mas ->
-          let
-            next = fromMaybe a ma
-          in
-            Lazy.Cons next $ step next mas
-    # Lazy.List
+  step a = over Lazy.List $ map case _ of
+    Lazy.Nil -> Lazy.Nil
+    Lazy.Cons ma mas ->
+      let
+        next = fromMaybe a ma
+      in
+        Lazy.Cons next $ step next mas
 
 switchB :: forall a. Behaviour a -> Event (Behaviour a) -> Raff (Behaviour a)
 switchB b e = diagonalB <$> stepper b e
