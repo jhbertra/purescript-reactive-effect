@@ -3,6 +3,7 @@ module Test.Effect.Reactive where
 import Prelude
 
 import Control.Alt ((<|>))
+import Control.Lazy (defer)
 import Control.Plus (empty)
 import Data.Align (aligned, nil)
 import Data.Compactable (compact, separate)
@@ -120,6 +121,11 @@ eventSpec = describe "Event" do
         bs <- interpretE (const $ pure real) as
         let modelBs = Model.interpretE (const $ pure model) as
         pure $ bs === modelBs
+    it "Matches the model implementation (lazy)" do
+      quickCheckImpure \(as :: _ (_ A)) -> do
+        bs <- interpretE (const $ pure $ defer \_ -> real) as
+        let modelBs = Model.interpretE (const $ pure model) as
+        pure $ bs === modelBs
 
   modelSpec
     :: forall a b
@@ -134,6 +140,11 @@ eventSpec = describe "Event" do
     it "Matches the model implementation" do
       quickCheckImpure \a as -> do
         bs <- interpretE (real a) as
+        let modelBs = Model.interpretE (model a) as
+        pure $ bs === modelBs
+    it "Matches the model implementation (lazy)" do
+      quickCheckImpure \a as -> do
+        bs <- interpretE (\e -> defer \_ -> real a e) as
         let modelBs = Model.interpretE (model a) as
         pure $ bs === modelBs
 
@@ -151,6 +162,11 @@ eventSpec = describe "Event" do
     it "Matches the model implementation" do
       quickCheckImpure \a b as bs -> do
         cs <- interpretE2 (real a b) as bs
+        let modelCs = Model.interpretE2 (model a b) as bs
+        pure $ cs === modelCs
+    it "Matches the model implementation (lazy)" do
+      quickCheckImpure \a b as bs -> do
+        cs <- interpretE2 (\e1 e2 -> defer \_ -> real a b e1 e2) as bs
         let modelCs = Model.interpretE2 (model a b) as bs
         pure $ cs === modelCs
 
@@ -203,6 +219,11 @@ behaviourSpec = describe "Behaviour" do
         bs <- interpretB (const $ pure real) as
         let modelBs = Model.interpretB (const $ pure model) as
         pure $ bs === modelBs
+    it "Matches the model implementation (lazy)" do
+      quickCheckImpure \(as :: _ (_ A)) -> do
+        bs <- interpretB (const $ pure $ defer \_ -> real) as
+        let modelBs = Model.interpretB (const $ pure model) as
+        pure $ bs === modelBs
 
   modelSpec
     :: forall a b
@@ -217,6 +238,11 @@ behaviourSpec = describe "Behaviour" do
     it "Matches the model implementation" do
       quickCheckImpure \a as -> do
         bs <- interpretB (real a) as
+        let modelBs = Model.interpretB (model a) as
+        pure $ bs === modelBs
+    it "Matches the model implementation (lazy)" do
+      quickCheckImpure \a as -> do
+        bs <- interpretB (\e -> defer \_ -> real a e) as
         let modelBs = Model.interpretB (model a) as
         pure $ bs === modelBs
 
@@ -239,5 +265,10 @@ behaviourSpec = describe "Behaviour" do
     it "Matches the model implementation" do
       quickCheckImpure \a b as bs -> do
         cs <- interpretB2 (real a b) as bs
+        let modelCs = Model.interpretB2 (model a b) as bs
+        pure $ cs === modelCs
+    it "Matches the model implementation (lazy)" do
+      quickCheckImpure \a b as bs -> do
+        cs <- interpretB2 (\e1 e2 -> defer \_ -> real a b e1 e2) as bs
         let modelCs = Model.interpretB2 (model a b) as bs
         pure $ cs === modelCs

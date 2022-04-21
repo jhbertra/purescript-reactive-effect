@@ -239,6 +239,61 @@ function LatchNode(id, initialValue, fire) {
   return self;
 }
 
+function LazyRef(f) {
+  let ref;
+  const deferred = [];
+  return {
+    force: function LazyRef_force() {
+      if (!ref) {
+        ref = f();
+        for (let i = 0; i < deferred.length; ++i) {
+          deferred[i](ref);
+        }
+      }
+      return ref;
+    },
+    defer: function LazyRef_defer(handler) {
+      if (ref) {
+        handler(ref);
+      } else {
+        deferred.push(handler);
+      }
+    },
+  };
+}
+
+function LazyNode(id, f) {
+  const { force, defer } = LazyRef(f);
+  defer(function LazyNode_defer(node) {
+    node.traverseParents(function (p) {
+      self.addParent(p);
+      node.removeParent(p);
+    });
+    node.addParent = self.addParent;
+    node.removeParent = self.removeParent;
+  });
+  const self = Node(id, function LazyNode_fire(value) {
+    force().fire(value);
+  });
+  self.addChild = function LazyNode_addChild(c) {
+    defer(function LazyNode_addChild_defer(node) {
+      node.addChild(c);
+    });
+  };
+  self.removeChild = function LazyNode_removeChild(c) {
+    defer(function LazyNode_removeChild_defer(node) {
+      node.removeChild(c);
+    });
+  };
+  self.read = function LazyNode_read() {
+    return force().read();
+  };
+  self.write = function LazyNode_write(value) {
+    return force().write(value);
+  };
+  return self;
+}
+
 function Circuit(id, inputs, outputs, fire) {
   const self = Node(id, fire);
   Object.values(inputs).forEach(self.addParent);
@@ -370,6 +425,8 @@ function Network(Just, Nothing, scheduler) {
   self.empty.traverseParents = function Network_empty_traverseParents() {};
   self.empty.addInput = function Network_empty_addInput() {};
   self.empty.removeInput = function Network_empty_removeInput() {};
+  self.empty.addOutput = function Network_empty_addOutput() {};
+  self.empty.removeOutput = function Network_empty_removeOutput() {};
   self.empty.addParent = function Network_empty_addParent() {};
   self.empty.removeParent = function Network_empty_removeParent() {};
   self.empty.addChild = function Network_empty_addChild() {};
@@ -497,6 +554,15 @@ function Network(Just, Nothing, scheduler) {
             evalProcess(Network_newProcess_write)(inValue)(self)();
             break;
         }
+      });
+    });
+  };
+
+  self.newLazyNode = function Network_newLazyNode(f) {
+    debug("Network.newLazyNode");
+    return newNode(function Network_newLazyNode_makeNode(id) {
+      return LazyNode(id, function Network_newLazyNode_eval() {
+        return f(self)();
       });
     });
   };
@@ -694,6 +760,14 @@ exports.newOutput = function newOutput(eff) {
   return function newOutput_raff(network) {
     return function newOutput_eff() {
       return network.newOutput((a) => eff(a)());
+    };
+  };
+};
+
+exports._newLazyNode = function newLazyNode(f) {
+  return function newLazyNode_raff(network) {
+    return function newLazyNode_eff() {
+      return network.newLazyNode(f);
     };
   };
 };

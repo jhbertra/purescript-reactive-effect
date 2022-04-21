@@ -21,7 +21,6 @@ module Effect.Reactive.Internal
   , actuate
   , addChild
   , addParent
-  , newAnimationFrameScheduler
   , cached
   , deactivate
   , emptyNode
@@ -29,13 +28,16 @@ module Effect.Reactive.Internal
   , ground
   , networkTime
   , newAnimation
+  , newAnimationFrameScheduler
   , newBuffer
   , newCircuit
   , newExecute
   , newInput
   , newLatch
+  , newLazyNode
   , newOutput
   , newProcess
+  , newTimeoutScheduler
   , onConnected
   , readLatch
   , readLatchEarly
@@ -44,21 +46,22 @@ module Effect.Reactive.Internal
   , removeParent
   , resume
   , runRaff
-  , testRaff
+  , setAnimation
   , suspend
-  , newTimeoutScheduler
+  , testRaff
   , toChild
   , toNode
   , toParent
   , toScheduler
   , withNetwork
-  , setAnimation
   ) where
 
 import Prelude
 
+import Control.Lazy (class Lazy, defer)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Error.Class (class MonadError, class MonadThrow)
+import Control.Monad.Fix (class MonadFix)
 import Control.Monad.Reader
   ( class MonadAsk
   , class MonadReader
@@ -225,6 +228,11 @@ derive newtype instance MonadRec (Raff t)
 derive newtype instance MonadAsk (Network t) (Raff t)
 derive newtype instance MonadReader (Network t) (Raff t)
 
+derive newtype instance MonadFix (Raff t)
+
+instance Lazy (Raff t a) where
+  defer f = Raff $ ReaderT $ defer \_ -> runReaderT $ coerce f unit
+
 foreign import cached :: forall t a. Raff t a -> Raff t a
 
 foreign import _addParent
@@ -314,6 +322,9 @@ foreign import newAnimation :: forall t a. Raff t (Animation t a)
 foreign import newOutput
   :: forall t a. (a -> Effect Unit) -> Raff t (OutputNode t a)
 
+foreign import _newLazyNode
+  :: forall t a b. Raff t (Node t a b) -> Raff t (Node t a b)
+
 foreign import newLatch :: forall t a. a -> Raff t (LatchNode t a)
 foreign import newProcess
   :: forall t a b. EvalProcess t a b -> Raff t (ProcessNode t a b)
@@ -332,6 +343,13 @@ foreign import suspend :: forall t. Raff t Unit
 foreign import readLatch :: forall t a. LatchNode t a -> Raff t a
 foreign import _readNode :: forall t a b. Node t a b -> Raff t (Maybe b)
 foreign import networkTime :: forall t. Raff t (Time t)
+
+newLazyNode
+  :: forall t a b node
+   . IsNode t a b node
+  => (Unit -> Raff t node)
+  -> Raff t node
+newLazyNode f = unsafeCoerce $ _newLazyNode $ unsafeCoerce $ defer f
 
 readLatchEarly :: forall t a. LatchNode t a -> Raff t a
 readLatchEarly latch = do

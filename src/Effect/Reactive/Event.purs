@@ -44,6 +44,8 @@ import Prelude
 
 import Control.Alt (class Alt, (<|>))
 import Control.Apply (lift2)
+import Control.Lazy (class Lazy, defer)
+import Control.Lazy.Lazy1 (class Lazy1)
 import Control.Plus (class Plus, empty)
 import Data.Align (class Align, class Alignable, align, aligned)
 import Data.Compactable (class Compactable, compact, separate)
@@ -67,6 +69,7 @@ import Effect.Reactive.Class (class MonadRaff, liftRaff)
 import Effect.Reactive.Internal
   ( class IsParent
   , LatchNode
+  , Node
   , ParentNode
   , Raff
   , actuate
@@ -84,6 +87,7 @@ import Effect.Reactive.Internal
   , newExecute
   , newInput
   , newLatch
+  , newLazyNode
   , newOutput
   , newProcess
   , onConnected
@@ -98,6 +102,7 @@ import Effect.Reactive.Internal
 import Effect.Reactive.Types (Time)
 import Effect.Ref as Ref
 import Effect.Unlift (askUnliftEffect, unliftEffect)
+import Unsafe.Coerce (unsafeCoerce)
 
 -------------------------------------------------------------------------------
 -- Events - discrete occurances at instantaneous points in time.
@@ -265,6 +270,14 @@ instance Semigroup a => Semigroup (Event t a) where
 instance Semigroup a => Monoid (Event t a) where
   mempty = empty
 
+instance Lazy (Event t a) where
+  defer f = unsafeCoerce
+    $ cached
+    $ newLazyNode (unsafeCoerce f :: forall b. _ -> Raff t (Node t a b))
+
+instance Lazy1 (Event t) where
+  defer1 = defer
+
 newEvent :: forall t a. Raff t (EventIO t a)
 newEvent = do
   input <- newInput
@@ -376,6 +389,14 @@ mkBehaviour = Behaviour <<< cached
 
 pureBehaviour :: forall t a. LatchNode t (TimeFn (Time t) a) -> Behaviour t a
 pureBehaviour = Behaviour <<< pure
+
+instance Lazy (Behaviour t a) where
+  defer f = mkBehaviour $ newLazyNode \_ -> do
+    let Behaviour l = f unit
+    l
+
+instance Lazy1 (Behaviour t) where
+  defer1 = defer
 
 instance Functor (Behaviour t) where
   map f (Behaviour rlfa) = mkBehaviour do
