@@ -9,7 +9,8 @@ module Effect.Reactive.Internal
   , ChildNode
   , EvalProcess
   , InputNode
-  , LatchNode
+  , Latch
+  , LatchWrite
   , Network
   , Node
   , OutputNode
@@ -34,18 +35,18 @@ module Effect.Reactive.Internal
   , newExecute
   , newInput
   , newLatch
-  , newLazyNode
+  , newLazyLatch
   , newOutput
   , newProcess
   , newTimeoutScheduler
   , onConnected
   , readLatch
-  , readLatchEarly
   , readNode
   , removeChild
   , removeParent
   , resume
   , runRaff
+  , runLater
   , setAnimation
   , suspend
   , testRaff
@@ -70,13 +71,21 @@ import Control.Monad.Reader
   )
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Unlift (class MonadUnlift)
-import Data.Function.Uncurried (Fn3, runFn3)
-import Data.Maybe (Maybe(..), maybe)
+import Data.Function.Uncurried (Fn4, runFn4)
+import Data.Lazy as DL
+import Data.Maybe (Maybe(..))
 import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (Error)
 import Effect.Reactive.Types (Time, Timeline)
-import Effect.Uncurried (EffectFn2, EffectFn4, runEffectFn2, runEffectFn4)
+import Effect.Uncurried
+  ( EffectFn1
+  , EffectFn2
+  , EffectFn4
+  , runEffectFn1
+  , runEffectFn2
+  , runEffectFn4
+  )
 import Effect.Unlift (class MonadUnliftEffect)
 import Prim.Row as Row
 import Prim.RowList (class RowToList, RowList)
@@ -98,11 +107,13 @@ foreign import data ChildNode :: Timeline -> Type -> Type -> Type
 
 foreign import data ParentNode :: Timeline -> Type -> Type -> Type
 
+foreign import data LatchWrite :: Timeline -> Type
+
 foreign import data BufferNode :: Timeline -> Type -> Type
 
 foreign import data OutputNode :: Timeline -> Type -> Type
 
-foreign import data LatchNode :: Timeline -> Type -> Type
+foreign import data Latch :: Timeline -> Type -> Type
 
 type EvalProcess t a b = (b -> Raff t Unit) -> a -> Raff t Unit
 
@@ -118,6 +129,9 @@ instance IsNode t a b (Node t a b) where
 instance IsNode t a a (InputNode t a) where
   toNode = unsafeCoerce
 
+instance IsNode t Void Unit (LatchWrite t) where
+  toNode = unsafeCoerce
+
 instance IsNode t a b (ParentNode t b a) where
   toNode = unsafeCoerce
 
@@ -128,9 +142,6 @@ instance IsNode t a a (BufferNode t a) where
   toNode = unsafeCoerce
 
 instance IsNode t a a (OutputNode t a) where
-  toNode = unsafeCoerce
-
-instance IsNode t a a (LatchNode t a) where
   toNode = unsafeCoerce
 
 instance IsNode t a b (ProcessNode t a b) where
@@ -145,10 +156,10 @@ instance IsParent t a b (ParentNode t a b) where
 instance IsParent t a a (InputNode t a) where
   toParent = unsafeCoerce
 
-instance IsParent t a a (BufferNode t a) where
+instance IsParent t Unit Void (LatchWrite t) where
   toParent = unsafeCoerce
 
-instance IsParent t a a (LatchNode t a) where
+instance IsParent t a a (BufferNode t a) where
   toParent = unsafeCoerce
 
 instance IsParent t b a (ProcessNode t a b) where
@@ -164,9 +175,6 @@ instance IsChild t a a (OutputNode t a) where
   toChild = unsafeCoerce
 
 instance IsChild t a a (BufferNode t a) where
-  toChild = unsafeCoerce
-
-instance IsChild t a a (LatchNode t a) where
   toChild = unsafeCoerce
 
 instance IsChild t a b (ProcessNode t a b) where
@@ -314,47 +322,85 @@ onConnected
   -> Raff t (Effect Unit)
 onConnected node = liftEffect <<< runEffectFn2 _onConnected (toNode node)
 
-foreign import newInput :: forall t a. Raff t (InputNode t a)
+foreign import newInput :: forall t a. String -> Raff t (InputNode t a)
 foreign import emptyNode :: forall t a. Raff t (BufferNode t a)
 foreign import ground :: forall t a. Raff t (InputNode t a)
-foreign import newBuffer :: forall t a. Raff t (BufferNode t a)
+foreign import newBuffer :: forall t a. String -> Raff t (BufferNode t a)
 foreign import newAnimation :: forall t a. Raff t (Animation t a)
 foreign import newOutput
-  :: forall t a. (a -> Effect Unit) -> Raff t (OutputNode t a)
+  :: forall t a. String -> (a -> Effect Unit) -> Raff t (OutputNode t a)
 
-foreign import _newLazyNode
-  :: forall t a b. Raff t (Node t a b) -> Raff t (Node t a b)
+foreign import _newLatch
+  :: forall t a
+   . String
+  -> a
+  -> Raff t
+       { latch :: Latch t a
+       , setUpdates :: EffectFn1 (LatchWrite t) Unit
+       }
 
-foreign import newLatch :: forall t a. a -> Raff t (LatchNode t a)
+foreign import _newLazyLatch
+  :: forall t a
+   . String
+  -> DL.Lazy a
+  -> Raff t
+       { latch :: Latch t a
+       , setUpdates :: EffectFn1 (LatchWrite t) Unit
+       }
+
 foreign import newProcess
-  :: forall t a b. EvalProcess t a b -> Raff t (ProcessNode t a b)
+  :: forall t a b. String -> EvalProcess t a b -> Raff t (ProcessNode t a b)
 
 foreign import newExecute
-  :: forall t a b. (a -> Raff t b) -> Raff t (ProcessNode t a b)
+  :: forall t a b. String -> (a -> Raff t b) -> Raff t (ProcessNode t a b)
 
 foreign import _newCircuit
   :: forall t ri riRead ro roWrite
-   . Fn3 { | ri } { | ro } (EvalCircuit t riRead roWrite) (Raff t Unit)
+   . Fn4 String { | ri } { | ro } (EvalCircuit t riRead roWrite) (Raff t Unit)
 
+foreign import runLater :: forall t. Raff t Unit -> Raff t Unit
 foreign import actuate :: forall t. Raff t Unit
 foreign import deactivate :: forall t. Raff t Unit
 foreign import resume :: forall t. Raff t Unit
 foreign import suspend :: forall t. Raff t Unit
-foreign import readLatch :: forall t a. LatchNode t a -> Raff t a
+foreign import _readLatch :: forall t a. Latch t a -> Raff t (Unit -> a)
 foreign import _readNode :: forall t a b. Node t a b -> Raff t (Maybe b)
 foreign import networkTime :: forall t. Raff t (Time t)
 
-newLazyNode
+newLatch
   :: forall t a b node
-   . IsNode t a b node
-  => (Unit -> Raff t node)
-  -> Raff t node
-newLazyNode f = unsafeCoerce $ _newLazyNode $ unsafeCoerce $ defer f
+   . IsParent t a b node
+  => String
+  -> a
+  -> Raff t { latch :: Latch t a, setUpdates :: node -> Raff t (LatchWrite t) }
+newLatch name initialValue = do
+  { latch, setUpdates } <- _newLatch name initialValue
+  pure
+    { latch
+    , setUpdates: \node -> do
+        let lw = unsafeCoerce node
+        liftEffect $ runEffectFn1 setUpdates $ unsafeCoerce lw
+        pure lw
+    }
 
-readLatchEarly :: forall t a. LatchNode t a -> Raff t a
-readLatchEarly latch = do
-  ma <- readNode latch
-  maybe (readLatch latch) pure ma
+newLazyLatch
+  :: forall t a b node
+   . IsParent t (DL.Lazy a) b node
+  => String
+  -> (DL.Lazy a)
+  -> Raff t { latch :: Latch t a, setUpdates :: node -> Raff t (LatchWrite t) }
+newLazyLatch name initialValue = do
+  { latch, setUpdates } <- _newLazyLatch name initialValue
+  pure
+    { latch
+    , setUpdates: \node -> do
+        let lw = unsafeCoerce node
+        liftEffect $ runEffectFn1 setUpdates $ unsafeCoerce lw
+        pure lw
+    }
+
+readLatch :: forall t a. Latch t a -> Raff t (DL.Lazy a)
+readLatch = map DL.defer <<< _readLatch
 
 readNode :: forall t a b node. IsNode t a b node => node -> Raff t (Maybe b)
 readNode = _readNode <<< toNode
@@ -365,11 +411,12 @@ newCircuit
   => RowToList ro rlo
   => InputRow t ri riRead rli
   => OutputRow t ro roWrite rlo
-  => { | ri }
+  => String
+  -> { | ri }
   -> { | ro }
   -> EvalCircuit t riRead roWrite
   -> Raff t Unit
-newCircuit = runFn3 _newCircuit
+newCircuit = runFn4 _newCircuit
 
 class InputRow :: Timeline -> Row Type -> Row Type -> RowList Type -> Constraint
 class InputRow t r rRead rl | rl -> r rRead t

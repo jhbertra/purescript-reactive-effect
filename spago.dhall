@@ -8,6 +8,7 @@
   , "catenable-lists"
   , "control"
   , "datetime"
+  , "debug"
   , "effect"
   , "either"
   , "enums"

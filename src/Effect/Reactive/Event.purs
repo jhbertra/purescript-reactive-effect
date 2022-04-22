@@ -32,9 +32,9 @@ module Effect.Reactive.Event
   , scanB
   , scanE
   , stepper
-  , switchB
+  -- , switchB
   , switchE
-  , switchMapB
+  -- , switchMapB
   , switchMapE
   , timeB
   , withTime
@@ -46,6 +46,7 @@ import Control.Alt (class Alt, (<|>))
 import Control.Apply (lift2)
 import Control.Lazy (class Lazy, defer)
 import Control.Lazy.Lazy1 (class Lazy1)
+import Control.Monad.Fix (liftLazy)
 import Control.Plus (class Plus, empty)
 import Data.Align (class Align, class Alignable, align, aligned)
 import Data.Compactable (class Compactable, compact, separate)
@@ -55,11 +56,13 @@ import Data.Filterable (class Filterable)
 import Data.Foldable (for_, traverse_)
 import Data.HeytingAlgebra (ff, implies, tt)
 import Data.Lazy (force)
+import Data.Lazy as DL
 import Data.List (List(..), (:))
 import Data.List as List
-import Data.Maybe (Maybe(..), maybe)
-import Data.These (these, theseLeft, theseRight)
-import Data.TimeFn (TimeFn(..), evalTimeFn)
+import Data.Maybe (Maybe(..))
+import Data.These (These(..), these, theseLeft, theseRight)
+import Data.TimeFn (evalTimeFn)
+import Data.TimeFn as TF
 import Data.Traversable (for)
 import Data.Traversable.Accum (Accum)
 import Data.Tuple (Tuple(..), snd)
@@ -68,8 +71,8 @@ import Effect.Class (liftEffect)
 import Effect.Reactive.Class (class MonadRaff, liftRaff)
 import Effect.Reactive.Internal
   ( class IsParent
-  , LatchNode
-  , Node
+  , Latch
+  , LatchWrite
   , ParentNode
   , Raff
   , actuate
@@ -87,7 +90,7 @@ import Effect.Reactive.Internal
   , newExecute
   , newInput
   , newLatch
-  , newLazyNode
+  , newLazyLatch
   , newOutput
   , newProcess
   , onConnected
@@ -95,6 +98,7 @@ import Effect.Reactive.Internal
   , readNode
   , removeChild
   , removeParent
+  , runLater
   , setAnimation
   , testRaff
   , toParent
@@ -102,57 +106,73 @@ import Effect.Reactive.Internal
 import Effect.Reactive.Types (Time)
 import Effect.Ref as Ref
 import Effect.Unlift (askUnliftEffect, unliftEffect)
+import Safe.Coerce (coerce)
 import Unsafe.Coerce (unsafeCoerce)
 
 -------------------------------------------------------------------------------
 -- Events - discrete occurances at instantaneous points in time.
 -------------------------------------------------------------------------------
 
-newtype Event t a = Event (Raff t (Exists (ParentNode t a)))
+type SomeParent t a = Exists (ParentNode t a)
+
+newtype Event t a = Event (Raff t (SomeParent t (DL.Lazy a)))
 type EventIO t a = { event :: Event t a, fire :: a -> Raff t Unit }
 
-mkEvent :: forall t a b node. IsParent t a b node => Raff t node -> Event t a
+mkEvent
+  :: forall t a b node
+   . IsParent t (DL.Lazy a) b node
+  => Raff t node
+  -> Event t a
 mkEvent = Event <<< map (mkExists <<< toParent) <<< cached
 
-pureEvent :: forall t a b node. IsParent t a b node => node -> Event t a
+pureEvent
+  :: forall t a b node. IsParent t (DL.Lazy a) b node => node -> Event t a
 pureEvent = Event <<< pure <<< mkExists <<< toParent
 
 mkEventNotCached
-  :: forall t a b node. IsParent t a b node => Raff t node -> Event t a
+  :: forall t a b node
+   . IsParent t (DL.Lazy a) b node
+  => Raff t node
+  -> Event t a
 mkEventNotCached = Event <<< map (mkExists <<< toParent)
 
 runEvent
   :: forall m t a r
    . MonadRaff t m
-  => (forall b. ParentNode t a b -> m r)
+  => (forall b. ParentNode t (DL.Lazy a) b -> m r)
   -> Event t a
   -> m r
 runEvent f (Event ra) = liftRaff ra >>= \na -> runExists f na
 
 instance Functor (Event t) where
   map f = map mkEvent $ runEvent \nodeA -> do
-    nodeB <- newProcess (_ <<< f)
+    nodeB <- newProcess "FunctorEvent" (_ <<< map f)
     nodeA `addChild` nodeB
     pure nodeB
 
+-- TODO add support for pull-based node evaluation
 instance Compactable (Event t) where
   compact = map mkEvent $ runEvent \nodeMa -> do
-    nodeA <- newProcess traverse_
+    nodeA <- newProcess "CompactEvent$compact" \write lma -> do
+      defer \_ -> traverse_ (write <<< pure) $ force lma
     nodeMa `addChild` nodeA
     pure nodeA
   separate event =
     let
       mMulti = runEvent
         ( \eitherN -> cached do
-            left <- newBuffer
-            right <- newBuffer
-            newCircuit { eitherAB: eitherN } { left, right } \inputs outputs ->
-              do
-                eitherAB <- inputs.eitherAB
-                case eitherAB of
-                  Just (Left a) -> outputs.left a
-                  Just (Right b) -> outputs.right b
-                  _ -> pure unit
+            left <- newBuffer "CompactEvent$separate$left"
+            right <- newBuffer "CompactEvent$separate$right"
+            newCircuit "CompactEvent$separate"
+              { eitherAB: eitherN }
+              { left, right }
+              \inputs outputs ->
+                do
+                  eitherAB <- inputs.eitherAB
+                  case force <$> eitherAB of
+                    Just (Left a) -> outputs.left $ pure a
+                    Just (Right b) -> outputs.right $ pure b
+                    _ -> pure unit
             pure { left, right }
         )
         event
@@ -163,23 +183,25 @@ instance Compactable (Event t) where
 
 instance Filterable (Event t) where
   filter p = map mkEvent $ runEvent \nodeMa -> do
-    nodeA <- newProcess \write a -> when (p a) $ write a
+    nodeA <- newProcess "FilterableEvent$filter" \write a -> defer \_ ->
+      when (p $ force a) $ write a
     nodeMa `addChild` nodeA
     pure nodeA
   partition p event =
     let
       mMulti = runEvent
         ( \nodeA -> cached do
-            no <- newBuffer
-            yes <- newBuffer
-            newCircuit { a: nodeA } { no, yes } \inputs outputs ->
-              do
-                ma <- inputs.a
-                case ma of
-                  Just a
-                    | p a -> outputs.yes a
-                    | otherwise -> outputs.no a
-                  _ -> pure unit
+            no <- newBuffer "FilterableEvent$partition$no"
+            yes <- newBuffer "FilterableEvent$partition$yes"
+            newCircuit "FilterableEvent$partition" { a: nodeA } { no, yes }
+              \inputs outputs ->
+                do
+                  ma <- inputs.a
+                  case force <$> ma of
+                    Just a
+                      | p a -> outputs.yes $ pure a
+                      | otherwise -> outputs.no $ pure a
+                    _ -> pure unit
             pure { no, yes }
         )
         event
@@ -188,22 +210,25 @@ instance Filterable (Event t) where
       , yes: mkEventNotCached $ _.yes <$> mMulti
       }
   filterMap f = map mkEvent $ runEvent \nodeMa -> do
-    nodeA <- newProcess \write -> traverse_ write <<< f
+    nodeA <- newProcess "FilterableEvent$filterMap" \write ->
+      traverse_ (write <<< pure) <<< f <<< force
     nodeMa `addChild` nodeA
     pure nodeA
   partitionMap f event =
     let
       mMulti = runEvent
         ( \nodeA -> cached do
-            left <- newBuffer
-            right <- newBuffer
-            newCircuit { a: nodeA } { left, right } \inputs outputs ->
-              do
-                ma <- inputs.a
-                case f <$> ma of
-                  Just (Left a) -> outputs.left a
-                  Just (Right b) -> outputs.right b
-                  _ -> pure unit
+            left <- newBuffer "FilterableEvent$partitionMap$left"
+            right <- newBuffer "FilterableEvent$partitionMap$right"
+            newCircuit "FilterableEvent$partitionMap" { a: nodeA }
+              { left, right }
+              \inputs outputs ->
+                do
+                  ma <- inputs.a
+                  case f <<< force <$> ma of
+                    Just (Left a) -> outputs.left $ pure a
+                    Just (Right b) -> outputs.right $ pure b
+                    _ -> pure unit
             pure { left, right }
         )
         event
@@ -216,8 +241,8 @@ instance Alt (Event t) where
   alt ea eb = mkEvent $ runEvent
     ( \a -> runEvent
         ( \b -> do
-            out <- newBuffer
-            newCircuit { a, b } { out } \inputs outputs -> do
+            out <- newBuffer "AltEvent"
+            newCircuit "AltEvent" { a, b } { out } \inputs outputs -> do
               ma <- inputs.a
               mb <- inputs.b
               traverse_ outputs.out $ ma <|> mb
@@ -231,11 +256,12 @@ instance Apply (Event t) where
   apply ef ea = mkEvent $ runEvent
     ( \f -> runEvent
         ( \a -> do
-            out <- newBuffer
-            newCircuit { f, a } { out } \inputs outputs -> do
-              mf <- inputs.f
-              ma <- inputs.a
-              traverse_ outputs.out $ mf <*> ma
+            out <- newBuffer "ApplyEvent"
+            newCircuit "ApplyEvent" { f, a } { out } \inputs outputs ->
+              do
+                mf <- inputs.f
+                ma <- inputs.a
+                traverse_ outputs.out $ lift2 apply mf ma
             pure out
         )
         ea
@@ -249,11 +275,17 @@ instance Align (Event t) where
   align f ea eb = mkEvent $ runEvent
     ( \a -> runEvent
         ( \b -> do
-            out <- newBuffer
-            newCircuit { a, b } { out } \inputs outputs -> do
-              ma <- inputs.a
-              mb <- inputs.b
-              traverse_ outputs.out $ align f ma mb
+            out <- newBuffer "AlignEvent"
+            newCircuit "AlignEvent" { a, b } { out }
+              \inputs outputs -> do
+                ma <- inputs.a
+                mb <- inputs.b
+                let
+                  f' = these
+                    (map (f <<< This))
+                    (map (f <<< That))
+                    (lift2 (map f <<< Both))
+                traverse_ outputs.out $ align f' ma mb
             pure out
         )
         eb
@@ -271,19 +303,17 @@ instance Semigroup a => Monoid (Event t a) where
   mempty = empty
 
 instance Lazy (Event t a) where
-  defer f = unsafeCoerce
-    $ cached
-    $ newLazyNode (unsafeCoerce f :: forall b. _ -> Raff t (Node t a b))
+  defer f = Event $ defer $ coerce f
 
 instance Lazy1 (Event t) where
   defer1 = defer
 
 newEvent :: forall t a. Raff t (EventIO t a)
 newEvent = do
-  input <- newInput
+  input <- newInput "newEvent"
   pure
     { event: pureEvent input
-    , fire: \a -> fire a input
+    , fire: \a -> fire (pure a) input
     }
 
 fromAddListener
@@ -291,9 +321,9 @@ fromAddListener
    . ((a -> Effect Unit) -> Effect (Effect Unit))
   -> Raff t (Tuple (Raff t Unit) (Event t a))
 fromAddListener addListener = do
-  input <- newInput
+  input <- newInput "fromAddListener"
   u <- askUnliftEffect
-  dispose <- liftEffect $ addListener \a -> unliftEffect u $ fire a input
+  dispose <- liftEffect $ addListener \a -> unliftEffect u $ fire (pure a) input
   pure $ Tuple (liftEffect dispose) (pureEvent input)
 
 fromAddListener_
@@ -304,7 +334,7 @@ fromAddListener_ = map snd <<< fromAddListener
 
 react :: forall t a. Event t a -> (a -> Effect Unit) -> Raff t (Raff t Unit)
 react event eff = event # runEvent \nodeA -> do
-  output <- newOutput $ liftEffect <<< eff
+  output <- newOutput "react" $ liftEffect <<< eff <<< DL.force
   nodeA `addChild` output
   pure $ nodeA `removeChild` output
 
@@ -317,9 +347,9 @@ bracketReact
   -> Raff t (Raff t Unit)
 bracketReact event acquire release eff = event # runEvent \nodeA -> do
   resourceRef <- liftEffect $ Ref.new Nothing
-  output <- newOutput \a -> liftEffect do
+  output <- newOutput "bracketReact" \a -> liftEffect do
     mResource <- liftEffect $ Ref.read resourceRef
-    traverse_ (flip eff a) mResource
+    traverse_ (flip eff (force a)) mResource
   dispose <- onConnected output do
     resource <- acquire
     Ref.write (Just resource) resourceRef
@@ -336,7 +366,8 @@ execute = executeMap identity
 
 executeMap :: forall t a b. (a -> Raff t b) -> Event t a -> Event t b
 executeMap f = map mkEvent $ runEvent \nodeA -> do
-  nodeB <- newExecute f
+  -- FIXME build lazilly
+  nodeB <- newExecute "executeMap" (map pure <<< f <<< force)
   nodeA `addChild` nodeB
   pure $ nodeB
 
@@ -345,13 +376,13 @@ withTime a = Tuple <$> timeB <&> a
 
 scanE :: forall t m a. MonadRaff t m => a -> Event t (a -> a) -> m (Event t a)
 scanE seed = runEvent \nodeF -> liftRaff do
-  latch <- newLatch seed
-  process <- newProcess \write f -> do
+  { setUpdates, latch } <- newLazyLatch "scanE" $ pure seed
+  process <- newProcess "scanE" \write f -> do
     a <- readLatch latch
-    write $ f a
+    write $ f <*> a
   nodeF `addChild` process
-  process `addChild` latch
-  pure $ pureEvent latch
+  void $ setUpdates process
+  pure $ pureEvent process
 
 switchE :: forall t m a. MonadRaff t m => Event t (Event t a) -> m (Event t a)
 switchE = switchMapE identity
@@ -364,14 +395,15 @@ switchMapE
   -> m (Event t b)
 switchMapE f = runEvent \nodeA -> liftRaff do
   currentRef <- liftEffect $ Ref.new Nothing
-  out <- newBuffer
-  process <- newProcess \write -> f >>> runEvent \nodeB -> do
-    mCurrent <- liftEffect (Ref.read currentRef)
-    traverse_ (runExists (removeParent out)) mCurrent
-    out `addParent` nodeB
-    liftEffect $ Ref.write (Just $ mkExists $ toParent $ nodeB) currentRef
-    ma <- readNode nodeB
-    traverse_ write ma
+  out <- newBuffer "switchMapE"
+  process <- newProcess "switchMapE" \write -> map f >>> liftLazy >>>
+    runEvent \nodeB -> do
+      mCurrent <- liftEffect (Ref.read currentRef)
+      traverse_ (runExists (removeParent out)) mCurrent
+      out `addParent` nodeB
+      liftEffect $ Ref.write (Just $ mkExists $ toParent $ nodeB) currentRef
+      mb <- readNode nodeB
+      traverse_ write mb
   nodeA `addChild` process
   process `addChild` out
   pure $ pureEvent out
@@ -380,58 +412,69 @@ switchMapE f = runEvent \nodeA -> liftRaff do
 -- Behaviours - continuous functions of time
 -------------------------------------------------------------------------------
 
-newtype Behaviour t a = Behaviour (Raff t (LatchNode t (TimeFn (Time t) a)))
+type TimeFn t a = TF.TimeFn (Time t) a
+
+newtype Behaviour t a = Behaviour
+  (Raff t { updates :: LatchWrite t, latch :: Latch t (TimeFn t a) })
+
 type BehaviourIO t a = { behaviour :: Behaviour t a, fire :: a -> Raff t Unit }
 
 mkBehaviour
-  :: forall t a. Raff t (LatchNode t (TimeFn (Time t) a)) -> Behaviour t a
-mkBehaviour = Behaviour <<< cached
+  :: forall t a
+   . Raff t { updates :: LatchWrite t, latch :: Latch t (TimeFn t a) }
+  -> Behaviour t a
+mkBehaviour raff = unsafeCoerce cached raff
 
-pureBehaviour :: forall t a. LatchNode t (TimeFn (Time t) a) -> Behaviour t a
-pureBehaviour = Behaviour <<< pure
+pureBehaviour
+  :: forall t a
+   . LatchWrite t
+  -> Latch t (TimeFn t a)
+  -> Behaviour t a
+pureBehaviour updates latch = Behaviour $ pure $ unsafeCoerce { updates, latch }
 
 instance Lazy (Behaviour t a) where
-  defer f = mkBehaviour $ newLazyNode \_ -> do
-    let Behaviour l = f unit
-    l
+  defer f = Behaviour $ defer $ coerce f
 
 instance Lazy1 (Behaviour t) where
   defer1 = defer
 
 instance Functor (Behaviour t) where
-  map f (Behaviour rlfa) = mkBehaviour do
-    lfa <- rlfa
-    fa <- readLatch lfa
-    lfb <- newLatch $ f <$> fa
-    pfb <- newProcess (_ <<< map f)
-    lfa `addChild` pfb
-    pfb `addChild` lfb
-    pure lfb
+  map f (Behaviour r) = mkBehaviour do
+    b <- r
+    a <- readLatch b.latch
+    { setUpdates, latch } <- newLazyLatch "FunctorBehaviour" $ map f <$> a
+    out <- newProcess "FunctorBehaviour" \write _ -> do
+      a' <- readLatch b.latch
+      write $ map f <$> a'
+    b.updates `addChild` out
+    updates <- setUpdates out
+    pure { updates, latch }
 
 instance Apply (Behaviour t) where
-  apply (Behaviour rlff) (Behaviour rlfa) = mkBehaviour do
-    lff <- rlff
-    lfa <- rlfa
-    ff <- readLatch lff
-    fa <- readLatch lfa
-    lfb <- newLatch $ ff <*> fa
-    newCircuit { ff: lff, fa: lfa } { lfb } \inputs outputs -> do
-      mff <- inputs.ff
-      mfa <- inputs.fa
-      ff' <- maybe (readLatch lff) pure mff
-      fa' <- maybe (readLatch lfa) pure mfa
-      outputs.lfb $ ff' <*> fa'
-    pure lfb
+  apply (Behaviour r1) (Behaviour r2) = mkBehaviour do
+    b1 <- r1
+    b2 <- r2
+    f <- readLatch b1.latch
+    a <- readLatch b2.latch
+    { setUpdates, latch } <- newLazyLatch "ApplyBehaviour" $ lift2 apply f a
+    out <- newBuffer "ApplyBehaviour"
+    newCircuit "ApplyBehaviour" { f: b1.updates, a: b2.updates } { out }
+      \_ outputs -> do
+        f' <- readLatch b1.latch
+        a' <- readLatch b2.latch
+        outputs.out $ lift2 apply f' a'
+    updates <- setUpdates out
+    pure { updates, latch }
 
-liftTimeFn :: forall t a. TimeFn (Time t) a -> Behaviour t a
+liftTimeFn :: forall t a. TimeFn t a -> Behaviour t a
 liftTimeFn fn = mkBehaviour do
-  groundNode <- ground
-  latch <- newLatch fn
-  groundNode `addChild` latch
-  pure latch
+  out <- ground
+  { setUpdates, latch } <- newLatch "liftTimeFn" fn
+  updates <- setUpdates out
+  pure { updates, latch }
 
 instance Applicative (Behaviour t) where
-  pure = liftTimeFn <<< K
+  pure = liftTimeFn <<< TF.K
 
 instance Semigroup a => Semigroup (Behaviour t a) where
   append = lift2 append
@@ -470,11 +513,12 @@ instance Field a => EuclideanRing (Behaviour t a) where
 
 newBehaviour :: forall t a. a -> Raff t (BehaviourIO t a)
 newBehaviour initialValue = do
-  input <- newInput
-  latch <- newLatch (K initialValue)
+  input <- newInput "newBehaviour"
+  { setUpdates, latch } <- newLatch "newBehaviour" $ pure initialValue
+  latchWrite <- setUpdates input
   pure
-    { behaviour: pureBehaviour latch
-    , fire: \a -> fire (K a) input
+    { behaviour: pureBehaviour latchWrite latch
+    , fire: \a -> fire (TF.K a) input
     }
 
 fromChanges
@@ -486,27 +530,29 @@ fromChanges initialValue = stepper initialValue <=< fromAddListener_
 
 animate
   :: forall t a. Behaviour t a -> (a -> Effect Unit) -> Raff t (Raff t Unit)
-animate (Behaviour rlfa) eff = do
-  lfa <- rlfa
+animate (Behaviour r) eff = do
+  u <- askUnliftEffect
+  { updates, latch } <- r
   animation <- newAnimation
   clearAnimationRef <- liftEffect $ Ref.new $ pure unit
   let
     clearCurrent = do
       join $ Ref.read clearAnimationRef
       Ref.write (pure unit) clearAnimationRef
-    animateTimeFn fa = liftEffect case fa of
-      K a -> do
-        clearCurrent
-        eff a
-      F f -> do
-        clearAnimation <- setAnimation animation $ eff <<< f
-        Ref.write clearAnimation clearAnimationRef
-      L lf -> animateTimeFn $ force lf
-  liftEffect <<< animateTimeFn =<< readLatch lfa
-  output <- newOutput animateTimeFn
-  lfa `addChild` output
+    animateTimeFn = do
+      fa <- unliftEffect u $ force <$> readLatch latch
+      case fa of
+        TF.K a -> do
+          clearCurrent
+          eff a
+        TF.F f -> do
+          clearAnimation <- setAnimation animation $ eff <<< f
+          Ref.write clearAnimation clearAnimationRef
+  runLater $ liftEffect $ animateTimeFn
+  output <- newOutput "animate" $ const animateTimeFn
+  updates `addChild` output
   pure do
-    lfa `removeChild` output
+    updates `removeChild` output
     liftEffect clearCurrent
 
 bracketAnimate
@@ -516,9 +562,9 @@ bracketAnimate
   -> (r -> Effect Unit)
   -> (r -> a -> Effect Unit)
   -> Raff t (Raff t Unit)
-bracketAnimate (Behaviour rlfa) acquire release eff = do
+bracketAnimate (Behaviour r) acquire release eff = do
   u <- askUnliftEffect
-  lfa <- rlfa
+  { updates, latch } <- r
   animation <- newAnimation
   clearAnimationRef <- liftEffect $ Ref.new $ pure unit
   resourceRef <- liftEffect $ Ref.new Nothing
@@ -526,56 +572,67 @@ bracketAnimate (Behaviour rlfa) acquire release eff = do
     clearCurrent = do
       join $ Ref.read clearAnimationRef
       Ref.write (pure unit) clearAnimationRef
-    animateTimeFn fa = liftEffect case fa of
-      K a -> do
-        clearCurrent
-        mResource <- Ref.read resourceRef
-        traverse_ (flip eff a) mResource
-      F f -> do
-        clearAnimation <- setAnimation animation \t -> do
+    animateTimeFn = do
+      fa <- unliftEffect u $ force <$> readLatch latch
+      case fa of
+        TF.K a -> do
+          clearCurrent
           mResource <- Ref.read resourceRef
-          traverse_ (flip eff (f t)) mResource
-        Ref.write clearAnimation clearAnimationRef
-      L lf -> animateTimeFn $ force lf
-  liftEffect <<< animateTimeFn =<< readLatch lfa
-  output <- newOutput animateTimeFn
+          traverse_ (flip eff a) mResource
+        TF.F f -> do
+          clearAnimation <- setAnimation animation \t -> do
+            mResource <- Ref.read resourceRef
+            traverse_ (flip eff (f t)) mResource
+          Ref.write clearAnimation clearAnimationRef
+  output <- newOutput "bracketAnimate" $ const animateTimeFn
   dispose <- onConnected output do
     resource <- acquire
     Ref.write (Just resource) resourceRef
-    animateTimeFn =<< unliftEffect u (readLatch lfa)
+    unliftEffect u $ runLater $ liftEffect animateTimeFn
     pure do
       clearCurrent
       release resource
       Ref.write Nothing resourceRef
-  lfa `addChild` output
+  updates `addChild` output
   pure do
-    lfa `removeChild` output
+    updates `removeChild` output
     liftEffect dispose
 
 timeB :: forall t. Behaviour t (Time t)
 timeB = liftTimeFn identity
 
-sampleB :: forall t m a. MonadRaff t m => Behaviour t a -> m a
-sampleB (Behaviour rlfa) =
-  liftRaff $ evalTimeFn <$> (readLatch =<< rlfa) <*> networkTime
+sampleB :: forall t m a. Lazy a => MonadRaff t m => Behaviour t a -> m a
+sampleB (Behaviour r) = liftRaff do
+  { latch } <- r
+  lazyf <- readLatch latch
+  time <- networkTime
+  pure $ defer \_ -> evalTimeFn (force lazyf) time
+
+unsafeSampleB :: forall t m a. MonadRaff t m => Behaviour t a -> m a
+unsafeSampleB (Behaviour r) = liftRaff do
+  { latch } <- r
+  lazyf <- readLatch latch
+  time <- networkTime
+  pure $ evalTimeFn (force lazyf) time
 
 stepper :: forall t m a. MonadRaff t m => a -> Event t a -> m (Behaviour t a)
-stepper a = map K >>> runEvent \nodeA -> liftRaff do
-  latch <- newLatch $ K a
-  nodeA `addChild` latch
-  pure $ pureBehaviour latch
+stepper a event = liftRaff do
+  { setUpdates, latch } <- newLazyLatch "stepper" $ pure $ pure a
+  nodeFA <- newProcess "stepper" (_ <<< map pure)
+  runLater do
+    runEvent (\nodeA -> nodeA `addChild` nodeFA) event
+  latchWrite <- setUpdates nodeFA
+  pure $ pureBehaviour latchWrite latch
 
 applyE :: forall t b a. Behaviour t (a -> b) -> Event t a -> Event t b
-applyE (Behaviour rlff) = map mkEvent
+applyE (Behaviour r) = map mkEvent
   ( runEvent \nodeA -> do
-      lff <- rlff
-      nodeB <- newBuffer
-      newCircuit { ff: lff, a: nodeA } { b: nodeB } \inputs outputs -> do
-        mff <- inputs.ff
-        ma <- inputs.a
-        ff <- maybe (readLatch lff) pure mff
-        f <- evalTimeFn ff <$> networkTime
-        traverse_ (outputs.b <<< f) ma
+      nodeB <- newProcess "applyE" \write a -> do
+        { latch } <- r
+        f <- readLatch latch
+        time <- networkTime
+        write $ flip evalTimeFn time <$> f <*> a
+      nodeA `addChild` nodeB
       pure nodeB
   )
 
@@ -592,47 +649,58 @@ scanB
   -> Event t (a -> a)
   -> m (Behaviour t a)
 scanB seed = runEvent \nodeF -> liftRaff do
-  latch <- newLatch $ K seed
-  process <- newProcess \write f -> do
+  { setUpdates, latch } <- newLazyLatch "scanB" $ pure $ pure seed
+  process <- newProcess "scanB" \write f -> do
     time <- networkTime
     fa <- readLatch latch
-    write $ K $ f $ evalTimeFn fa time
+    write $ TF.K <$> (f <*> (flip evalTimeFn time <$> fa))
   nodeF `addChild` process
-  process `addChild` latch
-  pure $ pureBehaviour latch
+  latchWrite <- setUpdates process
+  pure $ pureBehaviour latchWrite latch
 
-switchB
-  :: forall t m a
-   . MonadRaff t m
-  => Behaviour t a
-  -> Event t (Behaviour t a)
-  -> m (Behaviour t a)
-switchB b = switchMapB b identity
+-- switchB
+--   :: forall t m a
+--    . MonadRaff t m
+--   => Behaviour t a
+--   -> Event t (Behaviour t a)
+--   -> m (Behaviour t a)
+-- switchB b = switchMapB b identity
 
-switchMapB
-  :: forall t m a b
-   . MonadRaff t m
-  => Behaviour t b
-  -> (a -> Behaviour t b)
-  -> Event t a
-  -> m (Behaviour t b)
-switchMapB (Behaviour rlfb0) f = runEvent \nodeA -> liftRaff do
-  currentRef <- liftEffect $ Ref.new Nothing
-  lfb0 <- rlfb0
-  f0 <- readLatch lfb0
-  out <- newLatch f0
-  process <- newProcess \write a -> do
-    let Behaviour rlfb = f a
-    lfb <- rlfb
-    mCurrent <- liftEffect (Ref.read currentRef)
-    traverse_ (removeParent out) mCurrent
-    out `addParent` lfb
-    liftEffect $ Ref.write (Just lfb) currentRef
-    mfb <- readNode lfb
-    traverse_ write mfb
-  nodeA `addChild` process
-  process `addChild` out
-  pure $ pureBehaviour out
+-- switchMapB
+--   :: forall t m a b
+--    . MonadRaff t m
+--   => Behaviour t b
+--   -> (a -> Behaviour t b)
+--   -> Event t a
+--   -> m (Behaviour t b)
+-- switchMapB (Behaviour r0) f = runEvent \nodeA -> liftRaff do
+--   b0 <- r0
+--   b0 <- readLatch b0.latch
+--   currentRef <- liftEffect $ Ref.new b0.updates
+--   { setUpdates, latch } <- newLatch $ TF.L b0
+--   out <- newBuffer
+--   runExists (addParent out) b0.updates
+--   process <- newProcess \write la -> do
+--     let Behaviour rn = liftLazy $ f <$> la
+--     bn <- rn
+--     out `addParent` bn.updates
+--     mfb <- readNode bn.updates
+--     traverse_ write mfb
+--   nodeA `addChild` process
+--   process `addChild` out
+--   pure $ pureBehaviour out latch
+
+--   out <- newBuffer
+--   process <- newProcess \write -> map f >>> liftLazy >>> runEvent \nodeB -> do
+--     mCurrent <- liftEffect (Ref.read currentRef)
+--     traverse_ (runExists (removeParent out)) mCurrent
+--     out `addParent` nodeB
+--     liftEffect $ Ref.write (Just $ mkExists $ toParent $ nodeB) currentRef
+--     mb <- readNode nodeB
+--     traverse_ write mb
+--   nodeA `addChild` process
+--   process `addChild` out
+--   pure $ pureEvent out
 
 mapAccum
   :: forall t m s a
@@ -641,15 +709,18 @@ mapAccum
   -> Event t (s -> Accum s a)
   -> m (Accum (Behaviour t s) (Event t a))
 mapAccum seed = runEvent \nodeF -> liftRaff do
-  accum <- newLatch (K seed)
-  value <- newBuffer
-  newCircuit { f: nodeF } { accum, value } \inputs outputs -> do
-    inputs.f >>= traverse_ \f -> do
+  { setUpdates, latch } <- newLazyLatch "mapAccum" $ pure $ pure seed
+  value <- newBuffer "mapAccum$value"
+  accum <- newBuffer "mapAccum$accum"
+  newCircuit "mapAccum" { f: nodeF } { accum, value } \inputs outputs -> do
+    inputs.f >>= traverse_ \lf -> do
       time <- networkTime
-      acc <- f <<< flip evalTimeFn time <$> readLatch accum
-      outputs.accum $ K acc.accum
-      outputs.value acc.value
-  pure { accum: pureBehaviour accum, value: pureEvent value }
+      la <- readLatch latch
+      let acc = lf <*> (flip evalTimeFn time <$> la)
+      outputs.accum $ TF.K <<< _.accum <$> acc
+      outputs.value $ _.value <$> acc
+  updates <- setUpdates accum
+  pure { accum: pureBehaviour updates latch, value: pureEvent value }
 
 filterApply :: forall t a. Behaviour t (a -> Boolean) -> Event t a -> Event t a
 filterApply bp =
@@ -743,7 +814,7 @@ interpretB buildNetwork inputs = do
       traverse_ fireE input
       fireAlways unit
       flushScheduler
-      sampleB outputB
+      unsafeSampleB outputB
     deactivate
     pure outputs
 
@@ -765,6 +836,6 @@ interpretB2 buildNetwork as bs = do
       traverse_ fireB $ join $ theseRight theseAB
       fireAlways unit
       flushScheduler
-      sampleB outputB
+      unsafeSampleB outputB
     deactivate
     pure outputs

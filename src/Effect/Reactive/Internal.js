@@ -93,8 +93,8 @@ function traverse(iterator, f) {
   }
 }
 
-function Node(id, fire) {
-  debug("Node", id);
+function Node(id, name, fire) {
+  debug("new Node", id, name);
   const self = new EventTarget();
   const inputs = new Map();
   const outputs = new Map();
@@ -102,6 +102,9 @@ function Node(id, fire) {
   const children = new Map();
 
   self.id = id;
+  if (debug) {
+    self.name = name;
+  }
 
   self.traverseChildren = function Node_traverseChildren(f) {
     traverse(children.values(), f);
@@ -127,7 +130,7 @@ function Node(id, fire) {
   }
 
   self.addInput = function Node_addInput(input) {
-    debug("Node.addInput", self.id, input);
+    debug("Node.addInput", self.id, self.name, input);
     updateIO(function () {
       const count = inputs.get(input) || 0;
       inputs.set(input, count + 1);
@@ -151,7 +154,7 @@ function Node(id, fire) {
   };
 
   self.addOutput = function Node_addOutput(output) {
-    debug("Node.addOutput", self.id, output);
+    debug("Node.addOutput", self.id, self.name, output);
     updateIO(function () {
       const count = outputs.get(output) || 0;
       outputs.set(output, count + 1);
@@ -176,7 +179,7 @@ function Node(id, fire) {
 
   self.addParent = function Node_addParent(parent) {
     if (parents.has(parent.id)) return;
-    debug("Node.addParent", self.id, parent.id);
+    debug("Node.addParent", self.id, self.name, parent.id);
     parents.set(parent.id, parent);
     parent.addChild(self);
     traverse(outputs.keys(), parent.addOutput);
@@ -189,7 +192,7 @@ function Node(id, fire) {
 
   self.addChild = function Node_addChild(child) {
     if (children.has(child.id)) return;
-    debug("Node.addChild", self.id, child.id);
+    debug("Node.addChild", self.id, self.name, child.id);
     children.set(child.id, child);
     child.addParent(self);
     traverse(inputs.keys(), child.addInput);
@@ -201,15 +204,15 @@ function Node(id, fire) {
   };
 
   self.fire = function Node_fire(value) {
-    debug("Node.fire", id, value, inputs);
+    debug("Node.fire", id, name, value, inputs);
     fire(value, self);
   };
 
   return self;
 }
 
-function InputNode(id, fire) {
-  const self = Node(id, fire);
+function InputNode(id, name, fire) {
+  const self = Node(id, name, fire);
   self.addInput(self.id);
   delete self.addParent;
   delete self.addInput;
@@ -217,85 +220,16 @@ function InputNode(id, fire) {
   return self;
 }
 
-function OutputNode(id, fire) {
-  const self = Node(id, fire);
+function OutputNode(id, name, fire) {
+  const self = Node(id, name, fire);
   self.addOutput(self.id);
   delete self.addChild;
   delete self.removeChild;
   return self;
 }
 
-function LatchNode(id, initialValue, fire) {
-  const self = Node(id, fire);
-  let value = initialValue;
-  self.write = function LatchNode_write(x) {
-    debug("LatchNode.write", x);
-    value = x;
-  };
-  self.read = function LatchNode_read() {
-    debug("LatchNode.read", value);
-    return value;
-  };
-  return self;
-}
-
-function LazyRef(f) {
-  let ref;
-  const deferred = [];
-  return {
-    force: function LazyRef_force() {
-      if (!ref) {
-        ref = f();
-        for (let i = 0; i < deferred.length; ++i) {
-          deferred[i](ref);
-        }
-      }
-      return ref;
-    },
-    defer: function LazyRef_defer(handler) {
-      if (ref) {
-        handler(ref);
-      } else {
-        deferred.push(handler);
-      }
-    },
-  };
-}
-
-function LazyNode(id, f) {
-  const { force, defer } = LazyRef(f);
-  defer(function LazyNode_defer(node) {
-    node.traverseParents(function (p) {
-      self.addParent(p);
-      node.removeParent(p);
-    });
-    node.addParent = self.addParent;
-    node.removeParent = self.removeParent;
-  });
-  const self = Node(id, function LazyNode_fire(value) {
-    force().fire(value);
-  });
-  self.addChild = function LazyNode_addChild(c) {
-    defer(function LazyNode_addChild_defer(node) {
-      node.addChild(c);
-    });
-  };
-  self.removeChild = function LazyNode_removeChild(c) {
-    defer(function LazyNode_removeChild_defer(node) {
-      node.removeChild(c);
-    });
-  };
-  self.read = function LazyNode_read() {
-    return force().read();
-  };
-  self.write = function LazyNode_write(value) {
-    return force().write(value);
-  };
-  return self;
-}
-
-function Circuit(id, inputs, outputs, fire) {
-  const self = Node(id, fire);
+function Circuit(id, name, inputs, outputs, fire) {
+  const self = Node(id, name, fire);
   Object.values(inputs).forEach(self.addParent);
   Object.values(outputs).forEach(self.addChild);
   return self;
@@ -321,11 +255,18 @@ function Animation(id, scheduler) {
 }
 
 function Network(Just, Nothing, scheduler) {
+  debug("new network");
   const self = new EventTarget();
   let nextNodeId = 0;
+  let nextLatchId = 0;
   let nextAnimationId = 0;
-  const latchWrites = new Map();
+  const latchWrites = [];
+  const lateActions = [];
+  const lazyLatchInitializers = [];
+  const latches = new Map();
   const nodeValues = new Map();
+  const nodeNames = new Map();
+  const latchNames = new Map();
   const raisedInputs = new Map();
   const raisedCircuits = new Map();
   const raisedOutputs = new Map();
@@ -342,12 +283,17 @@ function Network(Just, Nothing, scheduler) {
   function evaluate(timestamp) {
     self.timestamp = timestamp;
     debug("Network.evaluate");
+    // flush any late actions that we have seen so far.
+    flushLateActions();
     self.status = NETWORK_EVALUATING;
     flushInputs();
     evaluateCircuits();
+    flushLazyLatchInitializers();
     flushLatchWrites();
+    flushLateActions();
     self.status = NETWORK_EMITTING;
     flushOutputs();
+    nodeValues.clear();
     debug("Network.evaluate - done");
     self.status = NETWORK_STANDBY;
   }
@@ -358,7 +304,13 @@ function Network(Just, Nothing, scheduler) {
       raisedInputs.values(),
       function Network_flushInputs_flushInput({ value, input }) {
         if (self.status === NETWORK_OFFLINE) return;
-        debug("Network.flushInputs", "flushing input", input.id, value);
+        debug(
+          "Network.flushInputs",
+          "flushing input",
+          input.id,
+          input.name,
+          value
+        );
         propagateToChildren(input, value);
       }
     );
@@ -367,44 +319,55 @@ function Network(Just, Nothing, scheduler) {
 
   function evaluateCircuits() {
     while (raisedCircuits.size > 0) {
-      const nodes = Array.from(raisedCircuits, function ([id, evalCircuit]) {
-        debug("Network.evaluateCircuits.process", id);
-        return evalCircuit;
-      });
+      const nodes = Array.from(
+        raisedCircuits,
+        function ([id, { name, evalCircuit }]) {
+          debug("Network.evaluateCircuits", "evaluating circuit", id, name);
+          return evalCircuit;
+        }
+      );
       raisedCircuits.clear();
       nodes.forEach(function Network_evaluateCircuits_process(evalCircuit) {
         if (self.status === NETWORK_OFFLINE) return;
         evalCircuit();
       });
     }
-    nodeValues.clear();
   }
 
   function flushLatchWrites() {
-    traverse(
-      latchWrites.values(),
-      function Network_evaluate_writeLatch({ value, latch }) {
-        if (self.status === NETWORK_OFFLINE) return;
-        debug("Network.writeLatch", latch.id, value);
-        latch.write(value);
-      }
-    );
-    latchWrites.clear();
+    debug("Network.flushLatchWrites");
+    while (latchWrites.length) {
+      latchWrites.pop()();
+    }
+  }
+
+  function flushLazyLatchInitializers() {
+    debug("Network.lateActions");
+    while (lazyLatchInitializers.length) {
+      lazyLatchInitializers.pop()();
+    }
+  }
+
+  function flushLateActions() {
+    debug("Network.lateActions");
+    while (lateActions.length) {
+      lateActions.pop()(self)();
+    }
   }
 
   function flushOutputs() {
     if (self.status === NETWORK_OFFLINE || raisedOutputs.size == 0) return;
-    traverse(raisedOutputs.entries(), function ([id, { value, sink }]) {
-      debug("Network.emit", id, value);
+    traverse(raisedOutputs.entries(), function ([id, { name, value, sink }]) {
+      debug("Network.emit", "emitting output", id, name, value);
       sink(value);
     });
     raisedOutputs.clear();
   }
 
   function newNode(makeNode) {
-    debug("Network.newNode");
     const id = nextNodeId++;
     const node = makeNode(id);
+    nodeNames.set(id, node.name);
     const superFire = node.fire;
     node.fire = function Network_newNode_fire(value) {
       switch (self.status) {
@@ -434,55 +397,63 @@ function Network(Just, Nothing, scheduler) {
   self.empty.fire = function Network_empty_fire() {};
 
   self.ground = newNode(function Network_ground_makeNode(id) {
-    return InputNode(id, function Network_ground_fire() {});
+    return InputNode(id, "$ground", function Network_ground_fire() {});
   });
 
-  self.newBuffer = function Network_newBuffer() {
-    debug("Network.newBuffer");
+  self.newBuffer = function Network_newBuffer(name) {
     return newNode(function Network_newBuffer_makeNode(id) {
-      return Node(id, function Network_newBuffer_fire(value, node) {
-        switch (self.status) {
-          case NETWORK_EVALUATING:
-            nodeValues.set(node.id, value);
-            node.traverseChildren((c) => c.fire(value));
-            break;
+      return Node(
+        id,
+        name + "$buffer",
+        function Network_newBuffer_fire(value, node) {
+          switch (self.status) {
+            case NETWORK_EVALUATING:
+              propagateToChildren(node, value);
+              break;
+          }
         }
-      });
+      );
     });
   };
 
-  self.newInput = function Network_newInput() {
-    debug("Network.newInput");
+  self.newInput = function Network_newInput(name) {
     return newNode(function Network_newInput_makeNode(id) {
-      return InputNode(id, function Network_newInput_fire(value, input) {
-        switch (self.status) {
-          case NETWORK_STANDBY:
-            self.status = NETWORK_SCHEDULED;
-            raisedInputs.set(id, { value, input });
-            scheduler.schedule(evaluate);
-            break;
-          case NETWORK_SCHEDULED:
-            raisedInputs.set(id, { value, input });
-            break;
-          case NETWORK_EVALUATING:
-          case NETWORK_EMITTING:
-            scheduler.schedule(() => input.fire(value));
-            break;
+      return InputNode(
+        id,
+        name + "$input",
+        function Network_newInput_fire(value, input) {
+          switch (self.status) {
+            case NETWORK_STANDBY:
+              self.status = NETWORK_SCHEDULED;
+              raisedInputs.set(id, { value, input });
+              scheduler.schedule(evaluate);
+              break;
+            case NETWORK_SCHEDULED:
+              raisedInputs.set(id, { value, input });
+              break;
+            case NETWORK_EVALUATING:
+            case NETWORK_EMITTING:
+              scheduler.schedule(() => input.fire(value));
+              break;
+          }
         }
-      });
+      );
     });
   };
 
-  self.newOutput = function Network_newOutput(sink) {
-    debug("Network.newOutput");
+  self.newOutput = function Network_newOutput(name, sink) {
     return newNode(function Network_newOutput_makeNode(id) {
-      return OutputNode(id, function Network_newOutput_fire(value) {
-        switch (self.status) {
-          case NETWORK_EVALUATING:
-            raisedOutputs.set(id, { value, sink });
-            break;
+      return OutputNode(
+        id,
+        name + "$output",
+        function Network_newOutput_fire(value, node) {
+          switch (self.status) {
+            case NETWORK_EVALUATING:
+              raisedOutputs.set(id, { name: node.name, value, sink });
+              break;
+          }
         }
-      });
+      );
     });
   };
 
@@ -506,17 +477,73 @@ function Network(Just, Nothing, scheduler) {
     };
   };
 
-  self.newLatch = function Network_newLatch(initialValue) {
-    debug("Network.newLatch");
-    return newNode(function Network_newLatch_makeNode(id) {
-      return LatchNode(
-        id,
-        initialValue,
-        function Network_newLatch_fire(value, node) {
+  self.newLatch = function Network_newLatch(isLazy, name, initialValue) {
+    const latchId = nextLatchId++;
+    const latchName = name + "$latch";
+    debug("Network.newLatch", isLazy, latchName, latchId, initialValue);
+    if (isLazy) {
+      if (self.status === NETWORK_EVALUATING) {
+        lazyLatchInitializers.unshift(() =>
+          latches.set(latchId, initialValue())
+        );
+      } else {
+        latches.set(latchId, initialValue());
+      }
+    } else {
+      latches.set(latchId, initialValue);
+    }
+    latchNames.set(latchId, latchName);
+    let updatesSet = false;
+    const writeBuffer = newNode(function Network_newLatch_makeNode(writerId) {
+      return Node(
+        writerId,
+        latchName + "$writer",
+        function Network_newLatch_fire(value) {
           switch (self.status) {
             case NETWORK_EVALUATING:
-              propagateToChildren(node, value);
-              latchWrites.set(id, { value, latch: node });
+              latchWrites.unshift(function Network_newLatch_write() {
+                debug("Network.writeLatch", latchId, latchName);
+                const valueWHNF = isLazy ? value() : value;
+                latches.set(latchId, valueWHNF);
+              });
+              break;
+          }
+        }
+      );
+    });
+    return {
+      latch: function Network_newLatch_read() {
+        debug("readLatch", latchId, latchName, latches.get(latchId));
+        if (!latches.has(latchId)) {
+          throw new Error(
+            "Network.newLatch.read: premature access to lazy latch " + latchName
+          );
+        }
+        return latches.get(latchId);
+      },
+      setUpdates: function Network_newLatch_setUpdates(latchWrite) {
+        if (updatesSet) {
+          throw new Error(
+            "Network.newLatch.setUpdates: updates node already set for latch " +
+              latchName
+          );
+        }
+        updatesSet = true;
+        latchWrite.addChild(writeBuffer);
+      },
+    };
+  };
+
+  self.newExecute = function Network_newExecute(name, execute) {
+    return newNode(function Network_newExecute_makeNode(id) {
+      return Node(
+        id,
+        name + "$execute",
+        function Network_newExecute_fire(inValue, node) {
+          switch (self.status) {
+            case NETWORK_EVALUATING:
+              const outValue = execute(inValue)(self)();
+              propagateToChildren(node, outValue);
               break;
           }
         }
@@ -524,51 +551,36 @@ function Network(Just, Nothing, scheduler) {
     });
   };
 
-  self.newExecute = function Network_newExecute(execute) {
-    debug("Network.newExecute");
-    return newNode(function Network_newExecute_makeNode(id) {
-      return Node(id, function Network_newExecute_fire(inValue, node) {
-        switch (self.status) {
-          case NETWORK_EVALUATING:
-            const outValue = execute(inValue)(self)();
-            propagateToChildren(node, outValue);
-            break;
-        }
-      });
-    });
-  };
-
-  self.newProcess = function Network_newProcess(evalProcess) {
+  self.newProcess = function Network_newProcess(name, evalProcess) {
     debug("Network.newProcess");
     return newNode(function Network_newProcess_makeNode(id) {
-      return Node(id, function Network_newProcess_fire(inValue, node) {
-        switch (self.status) {
-          case NETWORK_EVALUATING:
-            function Network_newProcess_write(outValue) {
-              return function Network_newProcess_write_raff(network) {
-                return function Network_newProcess_write_eff() {
-                  propagateToChildren(node, outValue);
+      return Node(
+        id,
+        name + "$process",
+        function Network_newProcess_fire(inValue, node) {
+          switch (self.status) {
+            case NETWORK_EVALUATING:
+              function Network_newProcess_write(outValue) {
+                return function Network_newProcess_write_raff(network) {
+                  return function Network_newProcess_write_eff() {
+                    propagateToChildren(node, outValue);
+                  };
                 };
-              };
-            }
-            evalProcess(Network_newProcess_write)(inValue)(self)();
-            break;
+              }
+              evalProcess(Network_newProcess_write)(inValue)(self)();
+              break;
+          }
         }
-      });
+      );
     });
   };
 
-  self.newLazyNode = function Network_newLazyNode(f) {
-    debug("Network.newLazyNode");
-    return newNode(function Network_newLazyNode_makeNode(id) {
-      return LazyNode(id, function Network_newLazyNode_eval() {
-        return f(self)();
-      });
-    });
-  };
-
-  self.newCircuit = function Network_newCircuit(inputs, outputs, evalCircuit) {
-    debug("Network.newCircuit");
+  self.newCircuit = function Network_newCircuit(
+    name,
+    inputs,
+    outputs,
+    evalCircuit
+  ) {
     const inputReads = {};
     const outputWrites = {};
     Object.entries(inputs).forEach(function ([k, inNode]) {
@@ -593,17 +605,38 @@ function Network(Just, Nothing, scheduler) {
     return newNode(function Network_newCircuit_makeNode(id) {
       return Circuit(
         id,
+        name + "$circuit",
         inputs,
         outputs,
         function Network_newCircuit_fire(_, node) {
           switch (self.status) {
             case NETWORK_EVALUATING:
-              raisedCircuits.set(id, evalCircuitEff);
+              raisedCircuits.set(id, {
+                name: node.name,
+                evalCircuit: evalCircuitEff,
+              });
               break;
           }
         }
       );
     });
+  };
+
+  self.runLater = function Network_runLater(lateAction) {
+    debug("Network.runLater");
+    lateActions.unshift(lateAction);
+    switch (self.status) {
+      case NETWORK_STANDBY:
+        lateActions.unshift(lateAction);
+        scheduler.schedule(evaluate);
+        break;
+      case NETWORK_EMITTING:
+        scheduler.schedule(() => self.runLater(lateAction));
+        break;
+      default:
+        lateActions.unshift(lateAction);
+        break;
+    }
   };
 
   self.actuate = function Network_actuate() {
@@ -629,7 +662,9 @@ function Network(Just, Nothing, scheduler) {
       self.dispatchEvent(new Event("deactivated"));
       raisedInputs.clear();
       raisedCircuits.clear();
-      latchWrites.clear();
+      lazyLatchInitializers.splice(0);
+      latchWrites.splice(0);
+      lateActions.splice(0);
       nodeValues.clear();
       raisedOutputs.clear();
       traverse(animations.values(), function stopAnimation({ animation }) {
@@ -675,7 +710,7 @@ function Network(Just, Nothing, scheduler) {
 
   self.readNode = function Network_readNode(id) {
     const value = nodeValues.has(id) ? Just(nodeValues.get(id)) : Nothing;
-    debug("Network.readNode", value);
+    debug("Network.readNode", id, nodeNames.get(id), value);
     return value;
   };
 
@@ -738,12 +773,20 @@ exports.ground = function ground(network) {
   };
 };
 
-exports.newInput = function newInput(network) {
-  return network.newInput;
+exports.newInput = function newInput(name) {
+  return function newInput_raff(network) {
+    return function newInput_eff() {
+      return network.newInput(name);
+    };
+  };
 };
 
-exports.newBuffer = function newBuffer(network) {
-  return network.newBuffer;
+exports.newBuffer = function newBuffer(name) {
+  return function newBuffer_raff(network) {
+    return function newBuffer_eff() {
+      return network.newBuffer(name);
+    };
+  };
 };
 
 exports.newAnimation = function newAnimation(network) {
@@ -756,50 +799,58 @@ exports.emptyNode = function emptyNode(network) {
   };
 };
 
-exports.newOutput = function newOutput(eff) {
+exports.newOutput = (name) => (eff) => {
   return function newOutput_raff(network) {
     return function newOutput_eff() {
-      return network.newOutput((a) => eff(a)());
+      return network.newOutput(name, (a) => eff(a)());
     };
   };
 };
 
-exports._newLazyNode = function newLazyNode(f) {
-  return function newLazyNode_raff(network) {
-    return function newLazyNode_eff() {
-      return network.newLazyNode(f);
-    };
-  };
-};
-
-exports.newLatch = function newLatch(initialValue) {
+exports._newLazyLatch = (name) => (initialValue) => {
   return function newLatch_raff(network) {
     return function newLatch_eff() {
-      return network.newLatch(initialValue);
+      return network.newLatch(true, name, initialValue);
     };
   };
 };
 
-exports.newProcess = function newProcess(evalProcess) {
+exports._newLatch = (name) => (initialValue) => {
+  return function newLatch_raff(network) {
+    return function newLatch_eff() {
+      return network.newLatch(false, name, initialValue);
+    };
+  };
+};
+
+exports.newProcess = (name) => (evalProcess) => {
   return function newProcess_raff(network) {
     return function newProcess_eff() {
-      return network.newProcess(evalProcess);
+      return network.newProcess(name, evalProcess);
     };
   };
 };
 
-exports.newExecute = function newExecute(execute) {
+exports.newExecute = (name) => (execute) => {
   return function newExecute_raff(network) {
     return function newExecute_eff() {
-      return network.newExecute(execute);
+      return network.newExecute(name, execute);
     };
   };
 };
 
-exports._newCircuit = function newCircuit(inputs, outputs, evalCircuit) {
+exports._newCircuit = function newCircuit(name, inputs, outputs, evalCircuit) {
   return function newCircuit_raff(network) {
     return function newCircuit_eff() {
-      return network.newCircuit(inputs, outputs, evalCircuit);
+      return network.newCircuit(name, inputs, outputs, evalCircuit);
+    };
+  };
+};
+
+exports.runLater = function runLater(action) {
+  return function runLater_raff(network) {
+    return function runLater_eff() {
+      return network.runLater(action);
     };
   };
 };
@@ -828,10 +879,10 @@ exports._readNode = function readNode(node) {
   };
 };
 
-exports.readLatch = function readLatch(latch) {
+exports._readLatch = function readLatch(read) {
   return function readLatch_raff() {
     return function readLatch_eff() {
-      return latch.read();
+      return read;
     };
   };
 };
