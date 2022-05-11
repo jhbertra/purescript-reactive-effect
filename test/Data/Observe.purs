@@ -5,7 +5,6 @@ import Prelude
 import Data.Array.NonEmpty (NonEmptyArray)
 import Data.Bifunctor (bimap)
 import Data.Either (Either)
-import Data.Function (applyFlipped)
 import Data.Identity (Identity(..))
 import Data.Lazy (Lazy, force)
 import Data.List (List)
@@ -177,8 +176,8 @@ instance Observable t o a => Observable t o (Min a) where
 instance Observable t o a => Observable t o (Max a) where
   observe = unsafeCoerce (observe :: t -> a -> o)
 
-instance (Arbitrary a, Ord b, Show b) => Observable a b (a -> b) where
-  observe = applyFlipped
+instance (Arbitrary a, Observable t o b) => Observable (Tuple a t) o (a -> b) where
+  observe (Tuple a t) f = observe t $ f a
 
 instance
   ( RowToList r rl

@@ -3,7 +3,7 @@ module Test.Data.Functor where
 import Prelude
 
 import Test.Data.Observe (class Observable, (=-=))
-import Test.QuickCheck (arbitrary)
+import Test.QuickCheck (class Arbitrary)
 import Test.QuickCheck.Extra (quickCheckGen')
 import Test.QuickCheck.Gen (Gen)
 import Test.QuickCheck.Laws (A, B, C)
@@ -14,15 +14,15 @@ functorSpec
    . Observable t1 o1 (f A)
   => Observable t2 o2 (f C)
   => Functor f
-  => (forall a. Gen a -> Gen (f a))
+  => (forall a. Arbitrary a => Gen (f a))
   -> Spec Unit
 functorSpec gen = describe "Functor instance" do
   it "obeys law: identity" do
     quickCheckGen' 1000 do
-      fa :: f A <- gen arbitrary
+      fa :: f A <- gen
       pure $ (identity <$> fa) =-= fa
   it "obeys law: composition" do
     quickCheckGen' 1000 do
-      fa :: f A <- gen arbitrary
+      fa :: f A <- gen
       pure \(f :: B -> C) (g :: A -> B) ->
         map (f <<< g) fa =-= map f (map g fa)

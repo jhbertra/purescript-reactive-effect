@@ -9,10 +9,11 @@ import Control.Monad.State.Trans (StateT(..), runStateT)
 import Control.Monad.Writer.Trans (WriterT(..), runWriterT)
 import Data.Either (Either(..))
 import Data.Identity (Identity(..))
+import Data.Lazy (force)
 import Data.Lazy as DL
 import Data.Newtype (class Newtype, unwrap)
-import Data.Symbol (class IsSymbol)
 import Data.Tuple (Tuple(..), fst, snd)
+import Data.Tuple.Nested (type (/\))
 import Effect (Effect)
 import Effect.Aff (Aff, error, fiberCanceler, launchAff, makeAff)
 import Effect.Class (liftEffect)
@@ -20,14 +21,7 @@ import Effect.Exception (throw)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Effect.Ref as Ref
 import Effect.Unsafe (unsafePerformEffect)
-import Prim.Row as R
-import Prim.RowList (class RowToList, RowList)
-import Prim.RowList as RL
-import Record as Record
-import Record.Builder (Builder)
-import Record.Builder as Builder
 import Safe.Coerce (coerce)
-import Type.Proxy (Proxy(..))
 import Unsafe.Coerce (unsafeCoerce)
 
 -- | Type class for monads that support fixpoints.
@@ -87,10 +81,10 @@ instance (MonadFix m) => MonadFix (ReaderT r m) where
   mfix f = ReaderT \r -> mfix (flip runReaderT r <<< f)
 
 instance (Lazy s, MonadFix m) => MonadFix (StateT s m) where
-  mfix f = StateT \s -> mfixTuple $ flip runStateT s <<< f <<< fst
+  mfix f = StateT \s -> mfix2 $ const <<< flip runStateT s <<< f
 
 instance (Lazy w, MonadFix m, Monoid w) => MonadFix (WriterT w m) where
-  mfix f = WriterT $ mfixTuple $ runWriterT <<< f <<< fst
+  mfix f = WriterT $ mfix2 $ const <<< runWriterT <<< f
 
 newtype LazyTuple a b = LazyTuple (Tuple a b)
 
@@ -124,14 +118,43 @@ overM
   -> m t
 overM _ = (unsafeCoerce :: (a -> m b) -> s -> m t)
 
-mfixTuple
+mfix2
   :: forall m a b
    . Lazy a
   => Lazy b
   => MonadFix m
-  => (Tuple a b -> m (Tuple a b))
-  -> m (Tuple a b)
-mfixTuple = map unwrap <<< mfix <<< overM LazyTuple
+  => (a -> b -> m (a /\ b))
+  -> m (a /\ b)
+mfix2 f = force
+  <$> mfix \t -> pure <$> f (liftLazy $ fst <$> t) (liftLazy $ snd <$> t)
+
+mfix3
+  :: forall m a b c
+   . Lazy a
+  => Lazy b
+  => Lazy c
+  => MonadFix m
+  => (a -> b -> c -> m (a /\ b /\ c))
+  -> m (a /\ b /\ c)
+mfix3 f = force <$> mfix \t -> pure <$> f
+  (liftLazy $ fst <$> t)
+  (liftLazy $ fst <<< snd <$> t)
+  (liftLazy $ snd <<< snd <$> t)
+
+mfix4
+  :: forall m a b c d
+   . Lazy a
+  => Lazy b
+  => Lazy c
+  => Lazy d
+  => MonadFix m
+  => (a -> b -> c -> d -> m (a /\ b /\ c /\ d))
+  -> m (a /\ b /\ c /\ d)
+mfix4 f = force <$> mfix \t -> pure <$> f
+  (liftLazy $ fst <$> t)
+  (liftLazy $ fst <<< snd <$> t)
+  (liftLazy $ fst <<< snd <<< snd <$> t)
+  (liftLazy $ snd <<< snd <<< snd <$> t)
 
 -- | A workaround for the missing Lazy instance for effects.
 -- | Abuses the fact that effects are represented as functions with no
@@ -143,43 +166,3 @@ mfixEffect f = do
     eff <- f $ unsafeCoerce effAsFn
     pure $ unsafeCoerce eff
   pure $ unsafeCoerce effAsFn
-
-mfixRecord
-  :: forall m rl r
-   . RowToList r rl
-  => DeferRecord rl r r
-  => MonadFix m
-  => ({ | r } -> m { | r })
-  -> m { | r }
-mfixRecord = map unwrap <<< mfix <<< overM LazyRecord
-
-newtype LazyRecord r = LazyRecord { | r }
-
-derive instance Newtype (LazyRecord r) _
-instance (RowToList r rl, DeferRecord rl r r) => Lazy (LazyRecord r) where
-  defer = LazyRecord <<< Builder.buildFromScratch
-    <<< deferRecord (Proxy :: _ rl)
-    <<< map unwrap
-
-class
-  DeferRecord (rl :: RowList Type) (ri :: Row Type) (ro :: Row Type)
-  | rl -> ri ro where
-  deferRecord :: Proxy rl -> (Unit -> { | ri }) -> Builder {} { | ro }
-
-instance DeferRecord RL.Nil ri () where
-  deferRecord _ _ = identity
-
-instance
-  ( IsSymbol label
-  , R.Cons label a ro' ro
-  , R.Cons label a ri' ri
-  , R.Lacks label ro'
-  , Lazy a
-  , DeferRecord rl ri ro'
-  ) =>
-  DeferRecord (RL.Cons label a rl) ri ro where
-  deferRecord _ f = Builder.insert label a <<< deferRecord rl f
-    where
-    label = Proxy :: _ label
-    rl = Proxy :: _ rl
-    a = defer $ Record.get label <<< f

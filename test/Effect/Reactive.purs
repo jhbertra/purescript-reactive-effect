@@ -1,290 +1,82 @@
-module Test.Effect.Reactive where
+module Test.Effect.Reactive (reactiveSpec) where
 
 import Prelude
 
 import Control.Alt ((<|>))
-import Control.Monad.Fix (mfixRecord)
-import Control.Plus (empty)
+import Control.Alternative (empty)
 import Data.Align (aligned, nil)
 import Data.Compactable (compact, separate)
-import Data.Either (Either)
-import Data.Filterable (filter, filterMap, partition, partitionMap)
-import Data.Int (toNumber)
-import Data.Maybe (Maybe)
-import Data.Newtype (unwrap)
-import Data.String (joinWith)
-import Effect.Reactive.Event
-  ( Behaviour
-  , Event
-  , applyE
-  , interpretB
-  , interpretB2
-  , interpretE
-  , interpretE2
-  , scanB
-  , scanE
-  , stepper
-  , timeB
+import Data.Filterable
+  ( eitherBool
+  , filter
+  , filterMap
+  , maybeBool
+  , partition
+  , partitionMap
   )
-import Effect.Reactive.Internal (Raff)
-import Effect.Reactive.Model as Model
-import Test.QuickCheck (class Arbitrary, Result(..), (===))
+import Data.Int (odd)
+import Test.Data.Observe (class Observable, (=-=))
+import Test.Effect.Reactive.Dual
+  ( Event
+  , Raff
+  , interpretEffect
+  , interpretEffect2
+  , interpretModel
+  , interpretModel2
+  )
+import Test.QuickCheck (class Arbitrary)
 import Test.QuickCheck.Extra (quickCheckImpure)
-import Test.QuickCheck.Laws (A)
-import Test.Spec (Spec, describe, focus, it)
+import Test.Spec (Spec, describe, it)
 
-spec :: Spec Unit
-spec = do
-  eventSpec
-  behaviourSpec
+reactiveSpec :: Spec Unit
+reactiveSpec = describe "Effect.Reactive" do
+  describe "Event" do
+    matchesModel "map" (pure <<< map (add 1))
+    matchesModel "compact" \(e :: _ _ (_ Int)) -> pure $ compact e
+    matchesModel "separate.left" \(e :: _ _ (_ Int String)) -> pure
+      (separate e).left
+    matchesModel "separate.right" \(e :: _ _ (_ Int String)) -> pure
+      (separate e).right
+    matchesModel "filter" (pure <<< filter odd)
+    matchesModel "filterMap" (pure <<< filterMap (maybeBool odd))
+    matchesModel "partition.no" (pure <<< _.no <<< partition odd)
+    matchesModel "partition.yes" (pure <<< _.yes <<< partition odd)
+    matchesModel "partitionMap.left"
+      (pure <<< _.left <<< partitionMap (eitherBool odd))
+    matchesModel "partitionMap.right"
+      (pure <<< _.right <<< partitionMap (eitherBool odd))
+    matchesModel2 "alt" (\(e1 :: _ _ Int) e2 -> pure $ e1 <|> e2)
+    matchesModel "empty" (\(_ :: _ _ Int) -> pure (empty :: _ _ Int))
+    matchesModel "nil" (\(_ :: _ _ Int) -> pure (nil :: _ _ Int))
+    matchesModel2 "apply" (\(e1 :: _ _ (Int -> String)) e2 -> pure $ e1 <*> e2)
+    matchesModel2 "aligned"
+      (\(e1 :: _ _ Int) (e2 :: _ _ String) -> pure $ aligned e1 e2)
+    matchesModel2 "aligned"
+      (\(e1 :: _ _ Int) (e2 :: _ _ String) -> pure $ aligned e1 e2)
 
-eventSpec :: Spec Unit
-eventSpec = describe "Event" do
-  describe "scanE" do
-    it "can be defined recursively event -> behaviour" do
-      let
-        scanE'
-          :: forall t a
-           . a
-          -> Event t (a -> a)
-          -> Raff t (Event t a)
-        scanE' a e1 = do
-          { e2 } <- mfixRecord \{ b } -> do
-            let e2 = ((\a' f -> f a') <$> b) `applyE` e1
-            b' <- stepper a e2
-            pure { b: b', e2 }
-          pure e2
-      quickCheckImpure \(a :: Int) fs -> do
-        expected <- interpretE (scanE' a) fs
-        actual <- interpretE (scanE a) fs
-        pure case actual === expected of
-          Success -> Success
-          Failed msg -> Failed $ joinWith "  \n"
-            [ msg
-            , "Counterexample: " <> show a <> ", " <> show (void <$> fs)
-            ]
-  it "can be defined recursively behaviour -> event" do
-    let
-      scanE'
-        :: forall t a
-         . a
-        -> Event t (a -> a)
-        -> Raff t (Event t a)
-      scanE' a e1 = do
-        { e2 } <- mfixRecord \{ e2 } -> do
-          b <- stepper a e2
-          let e2' = ((\a' f -> f a') <$> b) `applyE` e1
-          pure { b, e2: e2' }
-        pure e2
-    quickCheckImpure \(a :: Int) fs -> do
-      expected <- interpretE (scanE' a) fs
-      actual <- interpretE (scanE a) fs
-      pure case actual === expected of
-        Success -> Success
-        Failed msg -> Failed $ joinWith "  \n"
-          [ msg
-          , "Counterexample: " <> show a <> ", " <> show (void <$> fs)
-          ]
-  modelSpec2
-    "applyB"
-    (\(f :: A -> Int) _ ef ea -> applyE <$> stepper f ef <@> ea)
-    (\f _ ef ea -> Model.applyE <$> Model.stepper f ef <@> ea)
-  modelSpec2
-    "scanE"
-    (\(a :: Int) _ _ ef -> scanE a ef)
-    (\a _ _ ef -> Model.scanE a ef)
-  modelSpec2
-    "map"
-    (\(f :: A -> Int) _ _ ea -> pure $ f <$> ea)
-    (\f _ _ ea -> pure $ f <$> ea)
-  modelSpec
-    "compact"
-    (\(_ :: _ Int) ea -> pure $ compact ea)
-    (\_ ea -> pure $ compact ea)
-  modelSpec
-    "separate (left)"
-    (\(_ :: _ String Int) ea -> pure $ _.left $ separate ea)
-    (\_ ea -> pure $ _.left $ separate ea)
-  modelSpec
-    "separate (right)"
-    (\(_ :: _ String Int) ea -> pure $ _.right $ separate ea)
-    (\_ ea -> pure $ _.right $ separate ea)
-  modelSpec2
-    "filter"
-    (\(f :: Int -> Boolean) _ _ ea -> pure $ filter f ea)
-    (\f _ _ ea -> pure $ filter f ea)
-  modelSpec2
-    "partition (no)"
-    (\(f :: Int -> Boolean) _ _ ea -> pure $ _.no $ partition f ea)
-    (\f _ _ ea -> pure $ _.no $ partition f ea)
-  modelSpec2
-    "partition (yes)"
-    (\(f :: Int -> Boolean) _ _ ea -> pure $ _.yes $ partition f ea)
-    (\f _ _ ea -> pure $ _.yes $ partition f ea)
-  modelSpec2
-    "filterMap"
-    (\(f :: A -> Maybe Int) _ _ ea -> pure $ filterMap f ea)
-    (\f _ _ ea -> pure $ filterMap f ea)
-  modelSpec2
-    "partitionMap (left)"
-    (\(f :: A -> Either String Int) _ _ ea -> pure $ _.left $ partitionMap f ea)
-    (\f _ _ ea -> pure $ _.left $ partitionMap f ea)
-  modelSpec2
-    "partitionMap (right)"
-    (\(f :: A -> Either String Int) _ _ e -> pure $ _.right $ partitionMap f e)
-    (\f _ _ ea -> pure $ _.right $ partitionMap f ea)
-  modelSpec2
-    "alt"
-    (\(_ :: Int) _ a b -> pure $ a <|> b)
-    (\_ _ a b -> pure $ a <|> b)
-  modelSpec2
-    "apply"
-    (\(_ :: A -> Int) _ a b -> pure $ a <*> b)
-    (\_ _ a b -> pure $ a <*> b)
-  modelSpec2
-    "aligned"
-    (\(_ :: Int) (_ :: String) a b -> pure $ aligned a b)
-    (\_ _ a b -> pure $ aligned a b)
-  modelSpec0 "nil" nil (nil :: _ Int)
-  modelSpec0 "empty" empty (empty :: _ Int)
-  modelSpec0 "mempty" mempty (mempty :: _ String)
-  modelSpec2
-    "append"
-    (\(_ :: String) _ a b -> pure $ a <> b)
-    (\_ _ a b -> pure $ a <> b)
-  where
-  modelSpec0
-    :: forall a
-     . Eq a
-    => Show a
-    => String
-    -> (forall t. (Event t a))
-    -> (Model.Event a)
-    -> Spec Unit
-  modelSpec0 name real model = describe name do
-    it "Matches the model implementation" do
-      quickCheckImpure \(as :: _ (_ A)) -> do
-        bs <- interpretE (const $ pure real) as
-        let modelBs = Model.interpretE (const $ pure model) as
-        pure $ bs === modelBs
+matchesModel
+  :: forall t o a b
+   . Observable t o b
+  => Arbitrary a
+  => String
+  -> (forall t'. Event t' a -> Raff t' (Event t' b))
+  -> Spec Unit
+matchesModel name f = describe name $ it "matches the model" do
+  quickCheckImpure \as t -> do
+    actual <- interpretEffect f as
+    let expected = interpretModel f as
+    pure $ (actual =-= expected) t
 
-  modelSpec
-    :: forall a b
-     . Arbitrary a
-    => Eq b
-    => Show b
-    => String
-    -> (forall t. a -> Event t a -> Raff t (Event t b))
-    -> (a -> Model.Event a -> Model.Raff (Model.Event b))
-    -> Spec Unit
-  modelSpec name real model = describe name do
-    it "Matches the model implementation" do
-      quickCheckImpure \a as -> do
-        bs <- interpretE (real a) as
-        let modelBs = Model.interpretE (model a) as
-        pure $ bs === modelBs
-
-  modelSpec2
-    :: forall a b c
-     . Arbitrary a
-    => Arbitrary b
-    => Eq c
-    => Show c
-    => String
-    -> (forall t. a -> b -> Event t a -> Event t b -> Raff t (Event t c))
-    -> (a -> b -> Model.Event a -> Model.Event b -> Model.Raff (Model.Event c))
-    -> Spec Unit
-  modelSpec2 name real model = describe name do
-    it "Matches the model implementation" do
-      quickCheckImpure \a b as bs -> do
-        cs <- interpretE2 (real a b) as bs
-        let modelCs = Model.interpretE2 (model a b) as bs
-        pure $ cs === modelCs
-
-behaviourSpec :: Spec Unit
-behaviourSpec = describe "Behaviour" do
-  modelSpec0 "timeB" (unwrap <$> timeB) (toNumber <$> Model.timeB)
-  modelSpec "stepper" stepper (Model.stepper :: Int -> _ -> _)
-  modelSpec "pure" (\(a :: Int) _ -> pure $ pure a) (\a _ -> pure $ pure a)
-  modelSpec2
-    "(<*>)"
-    ( \(f :: A -> Int) a ef ea -> do
-        bf <- stepper f ef
-        ba <- stepper a ea
-        pure $ bf <*> ba
-    )
-    ( \f a ef ea -> do
-        bf <- Model.stepper f ef
-        ba <- Model.stepper a ea
-        pure $ bf <*> ba
-    )
-  modelSpec2
-    "append"
-    ( \(a :: String) b ea eb -> do
-        ba <- stepper a ea
-        bb <- stepper b eb
-        pure $ ba <> bb
-    )
-    ( \a b ea eb -> do
-        ba <- Model.stepper a ea
-        bb <- Model.stepper b eb
-        pure $ ba <> bb
-    )
-  modelSpec0 "mempty" (mempty) (mempty :: _ String)
-  modelSpec2
-    "scanB"
-    (\(a :: Int) _ _ ef -> scanB a ef)
-    (\a _ _ ef -> Model.scanB a ef)
-  where
-  modelSpec0
-    :: forall a
-     . Eq a
-    => Show a
-    => String
-    -> (forall t. (Behaviour t a))
-    -> (Model.Behaviour a)
-    -> Spec Unit
-  modelSpec0 name real model = describe name do
-    it "Matches the model implementation" do
-      quickCheckImpure \(as :: _ (_ A)) -> do
-        bs <- interpretB (const $ pure real) as
-        let modelBs = Model.interpretB (const $ pure model) as
-        pure $ bs === modelBs
-
-  modelSpec
-    :: forall a b
-     . Arbitrary a
-    => Eq b
-    => Show b
-    => String
-    -> (forall t. a -> Event t a -> Raff t (Behaviour t b))
-    -> (a -> Model.Event a -> Model.Raff (Model.Behaviour b))
-    -> Spec Unit
-  modelSpec name real model = describe name do
-    it "Matches the model implementation" do
-      quickCheckImpure \a as -> do
-        bs <- interpretB (real a) as
-        let modelBs = Model.interpretB (model a) as
-        pure $ bs === modelBs
-
-  modelSpec2
-    :: forall a b c
-     . Arbitrary a
-    => Arbitrary b
-    => Eq c
-    => Show c
-    => String
-    -> (forall t. a -> b -> Event t a -> Event t b -> Raff t (Behaviour t c))
-    -> ( a
-         -> b
-         -> Model.Event a
-         -> Model.Event b
-         -> Model.Raff (Model.Behaviour c)
-       )
-    -> Spec Unit
-  modelSpec2 name real model = describe name do
-    it "Matches the model implementation" do
-      quickCheckImpure \a b as bs -> do
-        cs <- interpretB2 (real a b) as bs
-        let modelCs = Model.interpretB2 (model a b) as bs
-        pure $ cs === modelCs
+matchesModel2
+  :: forall t o a b c
+   . Observable t o c
+  => Arbitrary a
+  => Arbitrary b
+  => String
+  -> (forall t'. Event t' a -> Event t' b -> Raff t' (Event t' c))
+  -> Spec Unit
+matchesModel2 name f = describe name $ it "matches the model" do
+  quickCheckImpure \as bs t -> do
+    actual <- interpretEffect2 f as bs
+    let expected = interpretModel2 f as bs
+    pure $ (actual =-= expected) t

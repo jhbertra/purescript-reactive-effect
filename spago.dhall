@@ -6,6 +6,8 @@
   , "arrays"
   , "bifunctors"
   , "catenable-lists"
+  , "concurrent-queues"
+  , "console"
   , "control"
   , "datetime"
   , "debug"
@@ -16,8 +18,6 @@
   , "exists"
   , "filterable"
   , "foldable-traversable"
-  , "freet"
-  , "functions"
   , "gen"
   , "identity"
   , "integers"
@@ -30,8 +30,8 @@
   , "nonempty"
   , "orders"
   , "parallel"
+  , "partial"
   , "prelude"
-  , "profunctor"
   , "quickcheck"
   , "quickcheck-laws"
   , "record"
@@ -46,8 +46,9 @@
   , "tuples"
   , "unfoldable"
   , "unlift"
-  , "unordered-collections"
   , "unsafe-coerce"
+  , "web-dom"
+  , "web-html"
   ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs" ]
