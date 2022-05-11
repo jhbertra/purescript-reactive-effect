@@ -44,6 +44,7 @@ newLatch initialValue updateOn = do
       { value: valueRef
       , subscribers
       , initialize: do
+          pure unit
           unlessM (liftEffect $ RM.isFilled parentRef) do
             { occurrence, subscription } <- subscribeAndRead updateOn
               $ terminalSubscriber

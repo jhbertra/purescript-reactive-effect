@@ -32,22 +32,25 @@ import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
 import Effect.Unlift (askUnliftEffect, unliftEffect)
 
+initializeLatch :: forall m a. MonadBuild m => Latch a -> m Unit
+initializeLatch latch = liftBuild $ BM $ RE \env ->
+  EQ.enqueue latch env.newLatches
+
+addReactor :: forall m a. MonadBuild m => Reactor a -> m Unit
+addReactor reactor = liftBuild $ BM $ RE \env -> do
+  void $ OB.insert (mkExists reactor) env.reactors
+  EQ.enqueue reactor env.newReactors
+
 class MonadEffect m <= MonadBuild m where
-  initializeLatch :: forall a. Latch a -> m Unit
-  addReactor :: forall a. Reactor a -> m Unit
+  liftBuild :: BuildM ~> m
 
 instance MonadBuild BuildM where
-  initializeLatch latch = BM $ RE \env -> do
-    EQ.enqueue latch env.newLatches
-  addReactor r = BM $ RE \env -> do
-    void $ OB.insert (mkExists r) env.reactors
-    EQ.enqueue r env.newReactors
+  liftBuild = identity
 
 instance MonadBuild PropagateM where
-  initializeLatch latch = PM $ RE \env -> EQ.enqueue latch env.newLatches
-  addReactor r = PM $ RE \env -> do
-    void $ OB.insert (mkExists r) env.reactors
-    EQ.enqueue r env.newReactors
+  liftBuild (BM m) =
+    PM $ RE \{ fireTriggers, newLatches, newReactors, reactors } ->
+      runReaderEffect m { fireTriggers, newLatches, newReactors, reactors }
 
 runBuildM :: forall a. FireTriggers -> BuildM a -> Effect a
 runBuildM fireTriggers (BM m) = do

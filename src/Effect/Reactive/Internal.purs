@@ -30,6 +30,7 @@ import Data.Tuple (Tuple(..))
 import Data.WeakBag (WeakBag, WeakBagTicket)
 import Data.WeakBag as WeakBag
 import Effect (Effect)
+import Effect.Aff (Aff)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.RW (RWEffect(..))
 import Effect.Reader (ReaderEffect(..))
@@ -39,6 +40,7 @@ import Effect.Ref.Maybe (MaybeRef)
 import Effect.Ref.Maybe as RM
 import Effect.Unlift (class MonadUnliftEffect)
 import Effect.Unsafe (unsafePerformEffect)
+import Safe.Coerce (coerce)
 
 -------------------------------------------------------------------------------
 -- Events
@@ -210,7 +212,7 @@ newtype InputCache a = InputCache
   }
 
 newtype FireTriggers = FireTriggers
-  (Array (Exists InvokeTrigger) -> Effect Unit)
+  (Array (Exists InvokeTrigger) -> Aff Unit)
 
 newtype InvokeTrigger a = InvokeTrigger
   { value :: a
@@ -473,7 +475,13 @@ raiseNowClearLater flag = do
 
 propagate :: Int -> PropagateM Unit -> PropagateM Unit
 propagate depth evaluate =
-  PM $ RE \env -> PQ.enqueue depth evaluate env.propagations
+  PM $ RE \env -> do
+    current <- Ref.read env.currentDepth
+    when (depth >= current) do
+      if (depth == current) then
+        coerce evaluate env
+      else
+        PQ.enqueue depth evaluate env.propagations
 
 propagations :: PropagateM (PriorityQueue (PropagateM Unit))
 propagations = PM $ RE \env -> pure env.propagations
