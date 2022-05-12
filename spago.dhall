@@ -1,6 +1,6 @@
-{ name = "frp"
+{ name = "reactive-effect"
 , license = "MIT"
-, repository = "https://github.com/jhbertra/purescript-frp.git"
+, repository = "https://github.com/jhbertra/purescript-reactive-effect.git"
 , dependencies =
   [ "aff"
   , "arrays"

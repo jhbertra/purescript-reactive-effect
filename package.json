@@ -1,7 +1,7 @@
 {
-  "name": "purescript-frp",
-  "version": "1.0.0",
-  "description": "[![Latest release](http://img.shields.io/github/release/jhbertra/purescript-frp.svg)](https://github.com/jhbertra/purescript-frp/releases) [![Build status](https://github.com/jhbertra/purescript-frp/workflows/Build/badge.svg?branch=main)](https://github.com/jhbertra/purescript-frp/actions?query=workflow%3ABuild+branch%3Amain) [![Pursuit](https://pursuit.purescript.org/packages/purescript-frp/badge)](https://pursuit.purescript.org/packages/purescript-frp)",
+  "name": "purescript-reactive-effect",
+  "version": "0.0.0",
+  "description": "[![Latest release](http://img.shields.io/github/release/jhbertra/purescript-reactive-effect.svg)](https://github.com/jhbertra/purescript-reactive-effect/releases) [![Build status](https://github.com/jhbertra/purescript-reactive-effect/workflows/Build/badge.svg?branch=main)](https://github.com/jhbertra/purescript-reactive-effect/actions?query=workflow%3ABuild+branch%3Amain) [![Pursuit](https://pursuit.purescript.org/packages/purescript-reactive-effect/badge)](https://pursuit.purescript.org/packages/purescript-reactive-effect)",
   "main": "index.js",
   "directories": {
     "test": "test"

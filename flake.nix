@@ -126,9 +126,9 @@
             echo done.
           '';
 
-          frp =
+          reactive-effect =
             pkgs.stdenv.mkDerivation {
-              name = "purescript-frp";
+              name = "purescript-reactive-effect";
               buildInputs = [
                 spagoPkgs.installSpagoStyle
               ];
@@ -158,7 +158,7 @@
 
         in
         {
-          defaultPackage = frp;
+          defaultPackage = reactive-effect;
           devShell = mkShell {
             buildInputs = [
               build
