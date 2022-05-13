@@ -24,8 +24,11 @@ foreign import data MaybeRef :: Type -> Type
 
 type role MaybeRef representational
 
+foreign import _new :: forall s. Maybe s -> Effect (MaybeRef s)
+
 -- | Create a new mutable reference containing the specified Maybe value.
-foreign import new :: forall s. Maybe s -> Effect (MaybeRef s)
+new :: forall s. Maybe s -> Effect (MaybeRef s)
+new = _new
 
 -- | Create a new empty mutable reference.
 empty :: forall s. Effect (MaybeRef s)

@@ -170,7 +170,13 @@
               test
               prettier
               bower
-            ] ++ easy-ps.buildInputs;
+              easy-ps.dhall-simple
+              easy-ps.purs
+              easy-ps.spago
+              easy-ps.spago2nix
+              easy-ps.purs-tidy
+              easy-ps.purescript-language-server
+            ];
             inherit (pre-commit-check) shellHook;
           };
         }

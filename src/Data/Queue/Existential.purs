@@ -15,7 +15,7 @@ import Effect (Effect)
 
 foreign import data ExistentialQueue :: (Type -> Type) -> Type
 
-foreign import new :: forall f. Effect (ExistentialQueue f)
+foreign import _new :: forall f. Effect (ExistentialQueue f)
 
 foreign import enqueue :: forall f a. f a -> ExistentialQueue f -> Effect Unit
 
@@ -34,6 +34,9 @@ foreign import drain
    . ExistentialQueue f
   -> (forall a. f a -> Effect Unit)
   -> Effect Unit
+
+new :: forall f. Effect (ExistentialQueue f)
+new = _new
 
 dequeue
   :: forall f r

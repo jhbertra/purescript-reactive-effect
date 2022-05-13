@@ -1,8 +1,8 @@
-exports.new = () => [];
+const _new = () => [];
 
-exports.enqueue = (a) => (queue) => () => queue.unshift(a);
+const enqueue = (a) => (queue) => () => queue.unshift(a);
 
-exports._dequeue =
+const _dequeue =
   ({ just, nothing }) =>
   (queue) =>
   (f) =>
@@ -13,10 +13,12 @@ exports._dequeue =
     return f(nothing);
   };
 
-exports.drain = (queue) => (f) => () => {
+const drain = (queue) => (f) => () => {
   while (queue.length) {
     f(queue.pop())();
   }
 };
 
-exports.toArray = (queue) => () => Array.from(queue);
+const toArray = (queue) => () => Array.from(queue);
+
+export { _new, enqueue, _dequeue, drain, toArray };

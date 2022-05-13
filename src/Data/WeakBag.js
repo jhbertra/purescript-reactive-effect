@@ -1,6 +1,4 @@
-"use strict";
-
-exports.new = (cleanup) => () => {
+const _new = (cleanup) => () => {
   return {
     cleanup,
     nextKey: 0,
@@ -9,7 +7,7 @@ exports.new = (cleanup) => () => {
   };
 };
 
-exports.insert = (member) => (weakBag) => () => {
+const insert = (member) => (weakBag) => () => {
   if (weakBag.issuedTickets.has(member)) {
     return weakBag.issuedTickets.get(member);
   }
@@ -25,16 +23,16 @@ exports.insert = (member) => (weakBag) => () => {
   return ticket;
 };
 
-exports.get = (ticket) => (weakBag) => () => {
+const get = (ticket) => (weakBag) => () => {
   if (ticket.isDestroyed) {
     throw new Error("WeakBagTicket is destroyed");
   }
   return weakBag.members.get(ticket.key);
 };
 
-exports.destroyTicket = ({ destroy }) => destroy;
+const destroyTicket = ({ destroy }) => destroy;
 
-exports.members =
+const members =
   ({ members }) =>
   () =>
     Array.from(members.values());
@@ -51,3 +49,5 @@ function destroyWeakBagTicket(weakBag, ticket) {
     }
   };
 }
+
+export { _new, insert, get, destroyTicket, members };

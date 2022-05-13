@@ -18,20 +18,22 @@ function PriorityQueue({ just, nothing }) {
   };
 }
 
-exports._new = (util) => () => PriorityQueue(util);
+const _new = (util) => () => PriorityQueue(util);
 
-exports.enqueue = (priority) => (a) => (queue) => () =>
+const enqueue = (priority) => (a) => (queue) => () =>
   queue.enqueue(priority, a);
 
-exports.dequeue = (queue) => () => {
+const dequeue = (queue) => () => {
   const dequeued = queue.dequeue();
   return dequeued ? queue.just(dequeued) : queue.nothing;
 };
 
-exports.drain = (queue) => (f) => () => {
+const drain = (queue) => (f) => () => {
   let value = queue.dequeue();
   while (value) {
     f(value.priority)(value.value)();
     value = queue.dequeue();
   }
 };
+
+export { _new, enqueue, dequeue, drain };

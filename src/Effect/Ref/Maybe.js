@@ -1,12 +1,10 @@
-"use strict";
-
-exports.new = function (val) {
+const _new = function (val) {
   return function () {
     return val.hasOwnProperty("value0") ? { value: val.value0 } : {};
   };
 };
 
-exports.newWithSelf = function (f) {
+const newWithSelf = function (f) {
   return function () {
     var ref = {};
     var val = f(ref);
@@ -17,7 +15,7 @@ exports.newWithSelf = function (f) {
   };
 };
 
-exports._read = function ({ nothing, just }) {
+const _read = function ({ nothing, just }) {
   return function (ref) {
     return function () {
       return ref.hasOwnProperty("value") ? just(ref.value) : nothing;
@@ -25,7 +23,7 @@ exports._read = function ({ nothing, just }) {
   };
 };
 
-exports.modifyImpl = function (f) {
+const modifyImpl = function (f) {
   return function (ref) {
     return function () {
       var t = f(ref.value);
@@ -35,7 +33,7 @@ exports.modifyImpl = function (f) {
   };
 };
 
-exports.write = function (val) {
+const write = function (val) {
   return function (ref) {
     return function () {
       ref.value = val;
@@ -43,14 +41,16 @@ exports.write = function (val) {
   };
 };
 
-exports.clear = function (ref) {
+const clear = function (ref) {
   return function () {
     delete ref.value;
   };
 };
 
-exports.isFilled = function (ref) {
+const isFilled = function (ref) {
   return function () {
     return ref.hasOwnProperty("value");
   };
 };
+
+export { _new, newWithSelf, _read, modifyImpl, write, clear, isFilled };

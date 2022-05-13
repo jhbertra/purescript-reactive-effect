@@ -1,4 +1,14 @@
-module Data.WeakBag where
+module Data.WeakBag
+  ( WeakBag
+  , WeakBagTicket
+  , new
+  , insert
+  , get
+  , destroyTicket
+  , members
+  , traverseMembers
+  , traverseMembers_
+  ) where
 
 import Prelude
 
@@ -10,13 +20,16 @@ import Effect.Class (class MonadEffect, liftEffect)
 foreign import data WeakBag :: Type -> Type
 foreign import data WeakBagTicket :: Type -> Type
 
-foreign import new :: forall a. Effect Unit -> Effect (WeakBag a)
+foreign import _new :: forall a. Effect Unit -> Effect (WeakBag a)
 foreign import insert :: forall a. a -> WeakBag a -> Effect (WeakBagTicket a)
 
 foreign import get :: forall a. WeakBagTicket a -> WeakBag a -> Effect a
 foreign import destroyTicket :: forall a. WeakBagTicket a -> Effect Unit
 
 foreign import members :: forall a. WeakBag a -> Effect (Array a)
+
+new :: forall a. Effect Unit -> Effect (WeakBag a)
+new = _new
 
 traverseMembers
   :: forall m a b. MonadEffect m => (a -> m b) -> WeakBag a -> m (Array b)

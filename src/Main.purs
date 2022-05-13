@@ -35,7 +35,7 @@ import Web.HTML.HTMLElement as HE
 import Web.HTML.Window (document)
 
 main :: Effect Unit
-main = launchAff_ $ runRaff do
+main = launchAff_ $ void $ runRaff do
   e <- indexed_ =<< (lift2 (<|>) nowEvent $ intervalEvent $ Seconds 1.0)
   let e1 = filter (eq 0 <<< (_ `mod` 3)) e
   let e2 = filter odd e

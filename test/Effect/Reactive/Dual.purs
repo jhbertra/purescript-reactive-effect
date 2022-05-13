@@ -18,7 +18,7 @@ import Data.Filterable
   , partitionMap
   )
 import Data.Maybe (Maybe)
-import Effect.Aff (Aff)
+import Effect (Effect)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Effect.Reactive as R
 import Test.Effect.Reactive.Model as M
@@ -124,7 +124,7 @@ interpretEffect
   :: forall a b
    . (forall t. Event t a -> Raff t (Event t b))
   -> Array (Maybe a)
-  -> Aff (Array (Maybe b))
+  -> Effect (Array (Maybe b))
 interpretEffect f = interpretEffect2 (\_ ea -> f ea) []
 
 interpretEffect2
@@ -132,7 +132,7 @@ interpretEffect2
    . (forall t. Event t a -> Event t b -> Raff t (Event t c))
   -> Array (Maybe a)
   -> Array (Maybe b)
-  -> Aff (Array (Maybe c))
+  -> Effect (Array (Maybe c))
 interpretEffect2 f = R.interpret2
   ( \e1 e2 -> map (\(E _ e) -> e)
       $ (\(R _ m) -> m)
