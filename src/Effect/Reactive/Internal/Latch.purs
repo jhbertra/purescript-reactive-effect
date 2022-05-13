@@ -15,8 +15,8 @@ import Effect.Reactive.Internal
   , LatchUpdate(..)
   , PullHint(..)
   , PullSource(..)
+  , _subscribe
   , invalidatePullSubscriber
-  , subscribeAndRead
   , tellHint
   , tellSource
   , terminalSubscriber
@@ -46,7 +46,7 @@ newLatch initialValue updateOn = do
       , initialize: do
           pure unit
           unlessM (liftEffect $ RM.isFilled parentRef) do
-            { occurrence, subscription } <- subscribeAndRead updateOn
+            { occurrence, subscription } <- _subscribe updateOn
               $ terminalSubscriber
               $ maybeUpdateLatch valueRef subscribers
             traverse_ (maybeUpdateLatch valueRef subscribers) occurrence

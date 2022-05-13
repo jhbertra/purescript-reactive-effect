@@ -11,8 +11,8 @@ import Effect.Reactive.Internal
   , InitializeReaction
   , Reaction(..)
   , Reactor(..)
+  , _subscribe
   , raiseReaction
-  , subscribeAndRead
   , terminalSubscriber
   )
 import Effect.Reactive.Internal.Build (addReactor)
@@ -28,7 +28,7 @@ _react event initialize = do
       , subscription: subscriptionRef
       , initialize: do
           { subscription, occurrence } <-
-            subscribeAndRead event $ terminalSubscriber \value ->
+            _subscribe event $ terminalSubscriber \value ->
               raiseReaction $ Reaction { reactor, value }
           liftEffect do
             con <- initialize occurrence

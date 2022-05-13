@@ -2,7 +2,6 @@ module Effect.Reactive.Internal where
 
 import Prelude
 
-import Control.Alternative (guard)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Fix (class MonadFix)
 import Control.Monad.Reader (class MonadAsk, class MonadReader)
@@ -11,22 +10,18 @@ import Control.Monad.Unlift (class MonadUnlift)
 import Control.Monad.Writer (tell)
 import Data.CatList (CatList(..))
 import Data.CatList as Cat
-import Data.Either (Either, either, hush)
 import Data.Exists (Exists, mkExists, runExists)
-import Data.Filterable (maybeBool)
 import Data.Foldable (for_, traverse_)
 import Data.Lazy (force)
 import Data.Lazy as DL
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), maybe')
 import Data.Newtype (class Newtype)
 import Data.OrderedBag (OrderedBag)
 import Data.Queue.Existential (ExistentialQueue)
 import Data.Queue.Existential as EQ
 import Data.Queue.Priority (PriorityQueue)
 import Data.Queue.Priority as PQ
-import Data.These (These, maybeThese, thatOrBoth, thisOrBoth)
 import Data.Traversable (traverse)
-import Data.Tuple (Tuple(..))
 import Data.WeakBag (WeakBag, WeakBagTicket)
 import Data.WeakBag as WeakBag
 import Effect (Effect)
@@ -237,12 +232,15 @@ type AnimationInitialized =
 -- Merges
 -------------------------------------------------------------------------------
 
-_alignE
-  :: forall a b
-   . Event a
+_mergeWithMaybeM
+  :: forall a b c
+   . (a -> PropagateM (Maybe c))
+  -> (b -> PropagateM (Maybe c))
+  -> (a -> b -> PropagateM (Maybe c))
+  -> Event a
   -> Event b
-  -> Event (These a b)
-_alignE ea eb subscriber = do
+  -> Event c
+_mergeWithMaybeM mergeLeft mergeRight mergeBoth ea eb subscriber = do
   occurrenceA <- liftEffect RM.empty
   occurrenceB <- liftEffect RM.empty
   propagated <- liftEffect $ Ref.new false
@@ -250,14 +248,15 @@ _alignE ea eb subscriber = do
   depthB <- liftEffect $ Ref.new invalidDepth
   depth <- liftEffect $ Ref.new invalidDepth
 
-  resultA <- subscribeAndRead ea
+  resultA <- _subscribe ea
     { propagate: \a -> do
         writeNowClearLater a occurrenceA
         myDepth <- liftEffect $ Ref.read depth
         propagate myDepth $ unlessRaised propagated do
           raiseNowClearLater propagated
           mb <- liftEffect $ RM.read occurrenceB
-          subscriber.propagate $ thisOrBoth a mb
+          mc <- maybe' (\_ -> mergeLeft a) (mergeBoth a) mb
+          traverse_ subscriber.propagate mc
     , recalclateDepth: \newDepthA -> do
         oldDepthA <- Ref.read depthA
         unless (oldDepthA == newDepthA) do
@@ -266,14 +265,15 @@ _alignE ea eb subscriber = do
           Ref.write ((max depthB' newDepthA) + 1) depth
     }
 
-  resultB <- subscribeAndRead eb
+  resultB <- _subscribe eb
     { propagate: \b -> do
         writeNowClearLater b occurrenceB
         myDepth <- liftEffect $ Ref.read depth
         propagate myDepth $ unlessRaised propagated do
           raiseNowClearLater propagated
           ma <- liftEffect $ RM.read occurrenceA
-          subscriber.propagate $ thatOrBoth b ma
+          mc <- maybe' (\_ -> mergeRight b) (\a -> mergeBoth a b) ma
+          traverse_ subscriber.propagate mc
     , recalclateDepth: \newDepthB -> do
         oldDepthB <- Ref.read depthB
         unless (oldDepthB == newDepthB) do
@@ -299,7 +299,11 @@ _alignE ea eb subscriber = do
       -- calculate the occurrence from the results read from the parents,
       -- as they should have already propagated this frame if firing, and
       -- return it.
-      pure $ maybeThese ma mb
+      case ma, mb of
+        Just a, Just b -> mergeBoth a b
+        Just a, Nothing -> mergeLeft a
+        Nothing, Just b -> mergeRight b
+        _, _ -> pure Nothing
     else do
       -- Run the initial merge later, when the depth is right. The parents
       -- may not have propagad yet, so the readings will be inaccurate
@@ -310,7 +314,11 @@ _alignE ea eb subscriber = do
       propagate myDepth do
         occA <- liftEffect $ RM.read occurrenceA
         occB <- liftEffect $ RM.read occurrenceB
-        traverse_ subscriber.propagate $ maybeThese occA occB
+        traverse_ subscriber.propagate =<< case occA, occB of
+          Just a, Just b -> mergeBoth a b
+          Just a, Nothing -> mergeLeft a
+          Nothing, Just b -> mergeRight b
+          _, _ -> pure Nothing
       pure Nothing
 
   pure
@@ -511,7 +519,7 @@ cached event = unsafePerformEffect do
           parentSub <- RM.read parentSubRef
           RM.clear parentSubRef
           traverse_ _.unsubscribe parentSub
-        result <- subscribeAndRead event
+        result <- _subscribe event
           { propagate: \a -> do
               writeNowClearLater a occurrence
               WeakBag.traverseMembers_ (\s -> s.propagate a) subscribers
@@ -534,73 +542,34 @@ cached event = unsafePerformEffect do
           }
       }
 
-subscribeAndRead
+_subscribe
   :: forall a. Event a -> EventSubscriber a -> PropagateM (EventResult a)
-subscribeAndRead = identity
-
-subscribe
-  :: forall a. Event a -> EventSubscriber a -> PropagateM EventSubscription
-subscribe e s = _.subscription <$> subscribeAndRead e s
+_subscribe = identity
 
 getEventHandle :: forall a. Event a -> PropagateM (EventHandle a)
 getEventHandle event = do
   currentValue <- liftEffect RM.empty
-  subscription <- subscribe event $ terminalSubscriber \a ->
+  { occurrence, subscription } <- _subscribe event $ terminalSubscriber \a ->
     writeNowClearLater a currentValue
+  for_ occurrence \a -> writeNowClearLater a currentValue
   pure { currentValue, subscription }
 
-_pushUncached :: forall a b. (a -> PropagateM (Maybe b)) -> Event a -> Event b
-_pushUncached f e1 sub = do
-  result <- subscribeAndRead e1 sub
+_pushRaw :: forall a b. (a -> PropagateM (Maybe b)) -> Event a -> Event b
+_pushRaw f e1 sub = do
+  result <- _subscribe e1 sub
     { propagate = traverse_ sub.propagate <=< f
     }
   occurrence <- traverse f result.occurrence
   pure result { occurrence = join occurrence }
 
 _push :: forall a b. (a -> PropagateM (Maybe b)) -> Event a -> Event b
-_push f = cached <<< _pushUncached f
-
-_mapE :: forall a b. (a -> b) -> Event a -> Event b
-_mapE f = _push $ pure <<< Just <<< f
+_push f = cached <<< _pushRaw f
 
 _neverE :: forall a. Event a
 _neverE = const $ pure $
   { occurrence: Nothing
   , subscription: { depth: zeroDepth, unsubscribe: mempty }
   }
-
-_compactE :: forall a. Event (Maybe a) -> Event a
-_compactE = _pushUncached pure
-
-_separateE
-  :: forall a b. Event (Either a b) -> { left :: Event a, right :: Event b }
-_separateE e =
-  { left: _pushUncached (pure <<< either Just (const Nothing)) e
-  , right: _pushUncached (pure <<< hush) e
-  }
-
-_filterE :: forall a. (a -> Boolean) -> Event a -> Event a
-_filterE p = _push $ pure <<< maybeBool p
-
-_filterMapE :: forall a b. (a -> Maybe b) -> Event a -> Event b
-_filterMapE f = _push $ pure <<< f
-
-_partitionE
-  :: forall a. (a -> Boolean) -> Event a -> { no :: Event a, yes :: Event a }
-_partitionE p e =
-  let
-    tagged = _mapE (\a -> Tuple (p a) a) e
-  in
-    { no: _pushUncached (\(Tuple b a) -> pure $ a <$ guard (not b)) tagged
-    , yes: _pushUncached (\(Tuple b a) -> pure $ a <$ guard b) tagged
-    }
-
-_partitionMapE
-  :: forall a b c
-   . (a -> Either b c)
-  -> Event a
-  -> { left :: Event b, right :: Event c }
-_partitionMapE f = _separateE <<< _mapE f
 
 -------------------------------------------------------------------------------
 -- Helpers

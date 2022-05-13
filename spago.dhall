@@ -7,7 +7,6 @@
   , "bifunctors"
   , "catenable-lists"
   , "concurrent-queues"
-  , "console"
   , "control"
   , "datetime"
   , "debug"

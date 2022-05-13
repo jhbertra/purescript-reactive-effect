@@ -1,7 +1,5 @@
 module Effect.Reactive
-  ( (<&)
-  , (<&>)
-  , class MonadPull
+  ( class MonadPull
   , class MonadRaff
   , Behaviour
   , Event
@@ -9,6 +7,9 @@ module Effect.Reactive
   , RaffPull
   , RaffPush
   , Timeline
+  , (<&)
+  , (<&>)
+  , (==>)
   , accumB
   , accumE
   , accumMB
@@ -17,7 +18,9 @@ module Effect.Reactive
   , accumMaybeE
   , accumMaybeMB
   , accumMaybeME
-  , alignPush
+  , alignM
+  , alignMaybe
+  , alignMaybeM
   , bracketReact
   , delayEvent
   , filterApply
@@ -39,12 +42,12 @@ module Effect.Reactive
   , makeEventAff
   , mapAccumB
   , mapAccumMB
+  , mapAccumM_
   , mapAccumMaybeB
   , mapAccumMaybeMB
-  , mapAccum_
-  , mapAccumM_
-  , mapAccumMaybe_
   , mapAccumMaybeM_
+  , mapAccumMaybe_
+  , mapAccum_
   , newEvent
   , nowEvent
   , partitionApply
@@ -54,6 +57,7 @@ module Effect.Reactive
   , pullContinuous
   , push
   , pushAlways
+  , pushFlipped
   , pushed
   , react
   , runRaff
@@ -85,7 +89,7 @@ import Control.Monad.Unlift (class MonadUnlift)
 import Control.Plus (empty)
 import Data.Align (class Align, class Alignable, align)
 import Data.Compactable (class Compactable, separate)
-import Data.Either (Either(..))
+import Data.Either (Either(..), either, hush)
 import Data.Exists (mkExists)
 import Data.Filterable (class Filterable, eitherBool, filterMap, maybeBool)
 import Data.Foldable (for_, traverse_)
@@ -93,7 +97,7 @@ import Data.HeytingAlgebra (ff, implies, tt)
 import Data.Identity (Identity(..))
 import Data.Maybe (Maybe(..))
 import Data.Patch (class Patch)
-import Data.These (These, both, these)
+import Data.These (These(..), these)
 import Data.Time.Duration (class Duration, fromDuration)
 import Data.Traversable (Accum)
 import Data.Tuple (Tuple(..), snd)
@@ -109,16 +113,11 @@ import Effect.Reactive.Internal
   , Event
   , PropagateM
   , PullM
-  , _alignE
-  , _compactE
-  , _filterE
-  , _filterMapE
-  , _mapE
+  , _mergeWithMaybeM
   , _neverE
-  , _partitionE
-  , _partitionMapE
   , _push
-  , _separateE
+  , _pushRaw
+  , cached
   ) as Internal
 import Effect.Reactive.Internal
   ( BuildM(..)
@@ -127,7 +126,6 @@ import Effect.Reactive.Internal
   , PropagateM(..)
   , PullHint(..)
   , PullM
-  , _push
   , tellHint
   )
 import Effect.Reactive.Internal.Build
@@ -269,36 +267,41 @@ type role Event nominal representational
 type EventIO (t :: Timeline) a = { event :: Event t a, fire :: a -> Aff Unit }
 
 instance Functor (Event t) where
-  map f = coerce $ Internal._mapE f
+  map f = push $ pure <<< Just <<< f
 
 instance Apply (Event t) where
-  apply (Event e1) (Event e2) = Event
-    $ Internal._push (pure <<< map (\(Tuple f a) -> f a) <<< both)
-    $ Internal._alignE e1 e2
+  apply = alignMaybe case _ of
+    Both f a -> Just $ f a
+    _ -> Nothing
 
 instance Alt (Event t) where
-  alt (Event e1) (Event e2) = Event
-    $ Internal._mapE (these identity identity const)
-    $ Internal._alignE e1 e2
+  alt = align $ these identity identity const
 
 instance Plus (Event t) where
   empty = Event Internal._neverE
 
 instance Align (Event t) where
-  align f = alignPush (pure <<< Just <<< f)
+  align f = alignMaybe (Just <<< f)
 
 instance Alignable (Event t) where
   nil = empty
 
 instance Compactable (Event t) where
-  compact (Event e) = Event $ Internal._compactE e
-  separate (Event e) = coerce $ Internal._separateE e
+  compact (Event e) = Event $ Internal._pushRaw pure e
+  separate (Event e) =
+    { left: Event $ Internal._pushRaw (pure <<< either Just (const Nothing)) e
+    , right: Event $ Internal._pushRaw (pure <<< hush) e
+    }
 
 instance Filterable (Event t) where
-  filter p (Event e) = Event $ Internal._filterE p e
-  filterMap f (Event e) = Event $ Internal._filterMapE f e
-  partition p (Event e) = coerce $ Internal._partitionE p e
-  partitionMap f (Event e) = coerce $ Internal._partitionMapE f e
+  filter p = push $ pure <<< maybeBool p
+  filterMap f = push $ pure <<< f
+  partition p e =
+    let
+      { left, right } = separate $ map (eitherBool p) e
+    in
+      { no: left, yes: right }
+  partitionMap f = separate <<< map f
 
 instance Semigroup a => Semigroup (Event t a) where
   append = align $ these identity identity append
@@ -356,7 +359,15 @@ newEvent = liftRaff $ Raff do
 
 push :: forall t a b. (a -> RaffPush t (Maybe b)) -> Event t a -> Event t b
 push = coerce
-  (_push :: (a -> PropagateM (Maybe b)) -> Internal.Event a -> Internal.Event b)
+  ( Internal._push
+      :: (a -> PropagateM (Maybe b)) -> Internal.Event a -> Internal.Event b
+  )
+
+pushFlipped
+  :: forall t a b. Event t a -> (a -> RaffPush t (Maybe b)) -> Event t b
+pushFlipped = flip push
+
+infixl 1 pushFlipped as ==>
 
 pushed :: forall t a. Event t (RaffPush t (Maybe a)) -> Event t a
 pushed = push identity
@@ -402,14 +413,39 @@ traceEventWith msg f = pushAlways \a -> do
   traceM { msg: "traceEvent: " <> msg, value: f a }
   pure a
 
-alignPush
+alignMaybe
+  :: forall t a b c
+   . (These a b -> Maybe c)
+  -> Event t a
+  -> Event t b
+  -> Event t c
+alignMaybe f = alignMaybeM (pure <<< f)
+
+alignM
+  :: forall t a b c
+   . (These a b -> RaffPush t c)
+  -> Event t a
+  -> Event t b
+  -> Event t c
+alignM f = alignMaybeM (map Just <<< f)
+
+alignMaybeM
   :: forall t a b c
    . (These a b -> RaffPush t (Maybe c))
   -> Event t a
   -> Event t b
   -> Event t c
-alignPush f (Event a) (Event b) =
-  Event $ Internal._push (coerce f) $ Internal._alignE a b
+alignMaybeM f (Event a) (Event b) = Event
+  $ Internal.cached
+  $ Internal._mergeWithMaybeM
+      (f' <<< This)
+      (f' <<< That)
+      (map f' <<< Both)
+      a
+      b
+  where
+  f' :: These a b -> PropagateM (Maybe c)
+  f' = coerce f
 
 accumE
   :: forall t m a b
@@ -447,7 +483,7 @@ accumMaybeME
   -> m (Event t b)
 accumMaybeME f seed ea = mfix \eb -> do
   bb <- stepper seed eb
-  pure $ flip push ea \a -> do
+  pure $ ea ==> \a -> do
     b <- sample bb
     f b a
 
@@ -732,7 +768,7 @@ accumMaybeMB
   -> m (Behaviour t b)
 accumMaybeMB f seed ea = mfix \bb -> do
   let
-    eb = flip push ea \a -> do
+    eb = ea ==> \a -> do
       b <- sample bb
       f b a
   stepper seed eb
@@ -780,7 +816,7 @@ mapAccumMaybeMB
 mapAccumMaybeMB f seed ea = do
   Tuple eaccum accum <- mfix2 \_ accum -> do
     let
-      eaccum = flip push ea \a -> do
+      eaccum = ea ==> \a -> do
         b <- sample accum
         result <- f b a
         pure case result of

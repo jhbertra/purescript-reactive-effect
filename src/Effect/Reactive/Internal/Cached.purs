@@ -11,7 +11,7 @@ import Effect.Reactive.Internal
   ( Event
   , EventSubscriber
   , EventSubscription
-  , subscribeAndRead
+  , _subscribe
   , writeNowClearLater
   )
 import Effect.Ref.Maybe (MaybeRef)
@@ -39,7 +39,7 @@ cached event = unsafePerformEffect do
           parentSub <- RM.read parentSubRef
           RM.clear parentSubRef
           traverse_ _.unsubscribe parentSub
-        result <- subscribeAndRead event
+        result <- _subscribe event
           { propagate: \a -> do
               writeNowClearLater a occurrence
               WeakBag.traverseMembers_ (\s -> s.propagate a) subscribers
