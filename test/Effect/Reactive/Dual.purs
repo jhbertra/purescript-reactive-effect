@@ -26,6 +26,25 @@ import Test.Effect.Reactive.Model as M
 data Event (t :: R.Timeline) a = E (M.Event a) (R.Event t a)
 data Behaviour (t :: R.Timeline) a = B (M.Behaviour a) (R.Behaviour t a)
 data Raff (t :: R.Timeline) a = R (M.Raff a) (R.Raff t a)
+data Push (t :: R.Timeline) a = RP (M.Push a) (R.RaffPush t a)
+
+liftEM :: forall t a. M.Event a -> Event t a
+liftEM e = E e $ defer \_ -> unsafeThrow "undefined"
+
+liftER :: forall t a. R.Event t a -> Event t a
+liftER = E $ defer \_ -> unsafeThrow "undefined"
+
+liftBM :: forall t a. M.Behaviour a -> Behaviour t a
+liftBM b = B b $ defer \_ -> unsafeThrow "undefined"
+
+liftBR :: forall t a. R.Behaviour t a -> Behaviour t a
+liftBR = B $ defer \_ -> unsafeThrow "undefined"
+
+liftRM :: forall t a. M.Raff a -> Raff t a
+liftRM m = R m $ defer \_ -> unsafeThrow "undefined"
+
+liftRR :: forall t a. R.Raff t a -> Raff t a
+liftRR = R $ defer \_ -> unsafeThrow "undefined"
 
 derive instance Functor (Raff t)
 instance Apply (Raff t) where
@@ -46,6 +65,26 @@ instance MonadFix (Raff t) where
     where
     fm a = let R m _ = f a in m
     fr a = let R _ r = f a in r
+
+derive instance Functor (Push t)
+instance Apply (Push t) where
+  apply (RP mf rf) (RP ma ra) = RP (mf <*> ma) (rf <*> ra)
+
+instance Applicative (Push t) where
+  pure a = RP (pure a) (pure a)
+
+instance Bind (Push t) where
+  bind (RP m r) k = RP
+    (m >>= k >>> case _ of RP m' _ -> m')
+    (r >>= k >>> case _ of RP _ r' -> r')
+
+instance Monad (Push t)
+
+instance MonadFix (Push t) where
+  mfix f = RP (mfix fm) (mfix fr)
+    where
+    fm a = let RP m _ = f a in m
+    fr a = let RP _ r = f a in r
 
 instance Functor (Event t) where
   map f (E m e) = E (map f m) (map f e)
@@ -140,3 +179,41 @@ interpretEffect2 f = R.interpret2
           (E (defer \_ -> unsafeThrow "undefined") e1)
           (E (defer \_ -> unsafeThrow "undefined") e2)
   )
+
+accumE
+  :: forall t a b
+   . (b -> a -> b)
+  -> b
+  -> Event t a
+  -> Raff t (Event t b)
+accumE f i (E m e) = R (liftEM <$> M.accumE f i m) (liftER <$> R.accumE f i e)
+
+accumME
+  :: forall t a b
+   . (b -> a -> Push t b)
+  -> b
+  -> Event t a
+  -> Raff t (Event t b)
+accumME f i (E m e) = R
+  (liftEM <$> M.accumME (\b a -> case f b a of RP p _ -> p) i m)
+  (liftER <$> R.accumME (\b a -> case f b a of RP _ r -> r) i e)
+
+accumMaybeE
+  :: forall t a b
+   . (b -> a -> Maybe b)
+  -> b
+  -> Event t a
+  -> Raff t (Event t b)
+accumMaybeE f i (E m e) = R
+  (liftEM <$> M.accumMaybeE f i m)
+  (liftER <$> R.accumMaybeE f i e)
+
+accumMaybeME
+  :: forall t a b
+   . (b -> a -> Push t (Maybe b))
+  -> b
+  -> Event t a
+  -> Raff t (Event t b)
+accumMaybeME f i (E m e) = R
+  (liftEM <$> M.accumMaybeME (\b a -> case f b a of RP p _ -> p) i m)
+  (liftER <$> R.accumMaybeME (\b a -> case f b a of RP _ r -> r) i e)

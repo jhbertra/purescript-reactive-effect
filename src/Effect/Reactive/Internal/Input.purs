@@ -10,7 +10,7 @@ import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
   ( CacheResult
-  , Event
+  , EventRep
   , EventSubscriber
   , InitializeInput
   , Input
@@ -73,6 +73,6 @@ subscribeInputCached input subscriber = do
       cache.finalize
       RM.clear cache.input.cache
 
-inputEvent :: forall a. Input a -> Event a
+inputEvent :: forall a. Input a -> EventRep a
 inputEvent input = wrapSubscribeCached (const zeroDepth)
   $ liftEffect <<< subscribeInputCached input

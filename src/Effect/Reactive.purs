@@ -32,6 +32,8 @@ module Effect.Reactive
   , interpret
   , interpret2
   , intervalEvent
+  , launchRaff
+  , launchRaff_
   , liftPull
   , liftRaff
   , liftSample2
@@ -103,47 +105,39 @@ import Data.Traversable (Accum)
 import Data.Tuple (Tuple(..), snd)
 import Debug (class DebugWarning, traceM)
 import Effect (Effect)
-import Effect.Aff (Aff, delay, killFiber, launchAff, launchAff_)
+import Effect.Aff (Aff, Fiber, delay, killFiber, launchAff, launchAff_)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (error)
 import Effect.RW (RWEffect(..), runRWEffect)
 import Effect.Reactive.Internal
-  ( Behaviour
+  ( BehaviourRep
   , BuildM
-  , Event
-  , PropagateM
-  , PullM
-  , _mergeWithMaybeM
-  , _neverE
-  , _push
-  , _pushRaw
-  , cached
-  ) as Internal
-import Effect.Reactive.Internal
-  ( BuildM(..)
+  , EventRep
   , FireTriggers(..)
   , InvokeTrigger(..)
-  , PropagateM(..)
+  , PropagateM
   , PullHint(..)
-  , PullM
+  , _neverE
+  , _pushRaw
   , tellHint
-  )
+  ) as Internal
 import Effect.Reactive.Internal.Build
   ( fireAndRead
   , liftBuild
   , runBuildM
   , runFrame
   )
+import Effect.Reactive.Internal.Cached (_cached) as Internal
 import Effect.Reactive.Internal.Input
   ( inputEvent
   , newInput
   , newInputWithTriggerRef
   )
 import Effect.Reactive.Internal.Latch (latchBehaviour, newLatch)
+import Effect.Reactive.Internal.Merge (_mergeWithMaybeM) as Internal
 import Effect.Reactive.Internal.Pipe (_pull)
 import Effect.Reactive.Internal.Reaction (_react)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
-import Effect.Reader (ReaderEffect(..))
 import Effect.Ref.Maybe as RM
 import Effect.Unlift (class MonadUnliftEffect, askUnliftEffect, unliftEffect)
 import Safe.Coerce (coerce)
@@ -172,6 +166,7 @@ instance MonadUnlift (Raff t) (Raff t) where
 derive newtype instance MonadFix (Raff t)
 derive newtype instance Semigroup a => Semigroup (Raff t a)
 derive newtype instance Monoid a => Monoid (Raff t a)
+derive newtype instance Lazy (Raff t a)
 
 class MonadPull t m <= MonadRaff t m | m -> t where
   liftRaff :: Raff t ~> m
@@ -182,10 +177,16 @@ instance MonadRaff t (Raff t) where
 instance MonadRaff t (RaffPush t) where
   liftRaff (Raff m) = RaffPush $ liftBuild m
 
-runRaff :: (forall t. Raff t Unit) -> Aff Void
+launchRaff_ :: (forall t. Raff t Unit) -> Effect Unit
+launchRaff_ m = launchAff_ (runRaff m)
+
+launchRaff :: (forall t. Raff t Unit) -> Effect (Fiber Unit)
+launchRaff m = launchAff (runRaff m)
+
+runRaff :: (forall t. Raff t Unit) -> Aff Unit
 runRaff (Raff m) = do
   triggerQueue <- Q.new
-  let fireTriggers = FireTriggers $ Q.write triggerQueue
+  let fireTriggers = Internal.FireTriggers $ Q.write triggerQueue
   u <- liftEffect $ runBuildM fireTriggers do
     u <- askUnliftEffect
     m
@@ -223,7 +224,7 @@ derive newtype instance Monoid a => Monoid (RaffPush t a)
 -- RaffPull monad
 -------------------------------------------------------------------------------
 
-newtype RaffPull (t :: Timeline) a = RaffPull (Internal.PullM a)
+newtype RaffPull (t :: Timeline) a = RaffPull (Internal.BehaviourRep a)
 
 type role RaffPull nominal representational
 
@@ -260,7 +261,7 @@ instance MonadPull t (RaffPull t) where
 -- Events
 -------------------------------------------------------------------------------
 
-newtype Event (t :: Timeline) a = Event (Internal.Event a)
+newtype Event (t :: Timeline) a = Event (Internal.EventRep a)
 
 type role Event nominal representational
 
@@ -317,9 +318,9 @@ makeEvent
   => ((a -> Effect Unit) -> Effect (Effect Unit))
   -> m (Event t a)
 makeEvent subscribe = liftRaff $ Raff do
-  FireTriggers fireTriggers <- asks _.fireTriggers
+  Internal.FireTriggers fireTriggers <- asks _.fireTriggers
   input <- liftEffect $ newInput \trigger -> subscribe \value -> launchAff_ $
-    fireTriggers [ mkExists $ InvokeTrigger { trigger, value } ]
+    fireTriggers [ mkExists $ Internal.InvokeTrigger { trigger, value } ]
   pure $ Event $ inputEvent input
 
 nowEvent :: forall t m. MonadRaff t m => m (Event t Unit)
@@ -348,20 +349,18 @@ makeEventAff f = makeEvent \fire -> do
 newEvent :: forall t m a. MonadRaff t m => m (EventIO t a)
 newEvent = liftRaff $ Raff do
   { input, trigger } <- liftEffect newInputWithTriggerRef
-  FireTriggers fireTriggers <- asks _.fireTriggers
+  Internal.FireTriggers fireTriggers <- asks _.fireTriggers
   pure
     { event: Event $ inputEvent input
     , fire: \value -> do
         mTrigger <- liftEffect $ RM.read trigger
         for_ mTrigger \t ->
-          fireTriggers [ mkExists $ InvokeTrigger { trigger: t, value } ]
+          fireTriggers
+            [ mkExists $ Internal.InvokeTrigger { trigger: t, value } ]
     }
 
 push :: forall t a b. (a -> RaffPush t (Maybe b)) -> Event t a -> Event t b
-push = coerce
-  ( Internal._push
-      :: (a -> PropagateM (Maybe b)) -> Internal.Event a -> Internal.Event b
-  )
+push f (Event e) = Event $ Internal._cached $ Internal._pushRaw (coerce f) e
 
 pushFlipped
   :: forall t a b. Event t a -> (a -> RaffPush t (Maybe b)) -> Event t b
@@ -436,7 +435,7 @@ alignMaybeM
   -> Event t b
   -> Event t c
 alignMaybeM f (Event a) (Event b) = Event
-  $ Internal.cached
+  $ Internal._cached
   $ Internal._mergeWithMaybeM
       (f' <<< This)
       (f' <<< That)
@@ -444,7 +443,7 @@ alignMaybeM f (Event a) (Event b) = Event
       a
       b
   where
-  f' :: These a b -> PropagateM (Maybe c)
+  f' :: These a b -> Internal.PropagateM (Maybe c)
   f' = coerce f
 
 accumE
@@ -557,7 +556,7 @@ mapAccumMaybeM_ f b e = _.value <$> mapAccumMaybeMB f b e
 -- Behaviours
 -------------------------------------------------------------------------------
 
-newtype Behaviour (t :: Timeline) a = Behaviour (Internal.Behaviour a)
+newtype Behaviour (t :: Timeline) a = Behaviour (Internal.BehaviourRep a)
 
 type role Behaviour nominal representational
 
@@ -612,10 +611,11 @@ instance HeytingAlgebra a => HeytingAlgebra (Behaviour t a) where
 instance BooleanAlgebra a => BooleanAlgebra (Behaviour t a)
 
 pull :: forall t a. RaffPull t a -> Behaviour t a
-pull = coerce (_pull :: PullM a -> Internal.Behaviour a)
+pull = coerce (_pull :: Internal.BehaviourRep a -> Internal.BehaviourRep a)
 
 pullContinuous :: forall t a. RaffPull t a -> Behaviour t a
-pullContinuous (RaffPull m) = pull $ RaffPull $ tellHint PullContinuous *> m
+pullContinuous (RaffPull m) =
+  pull $ RaffPull $ Internal.tellHint Internal.PullContinuous *> m
 
 patcher
   :: forall patch t m a

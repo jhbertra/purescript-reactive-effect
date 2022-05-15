@@ -9,9 +9,8 @@ import Data.WeakBag as WeakBag
 import Effect.Class (liftEffect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
-  ( Behaviour
+  ( BehaviourRep
   , Pipe
-  , PullM
   , PullSubscriber(..)
   , PullSubscription(..)
   , trackSubscriber
@@ -19,18 +18,19 @@ import Effect.Reactive.Internal
 import Effect.Ref as Ref
 import Effect.Unsafe (unsafePerformEffect)
 
-_pull :: PullM ~> Behaviour
+_pull :: BehaviourRep ~> BehaviourRep
 _pull evaluate = unsafePerformEffect do
   cache <- Ref.new Nothing
   pure $ pipeBehaviour { evaluate, cache }
 
-pipeBehaviour :: Pipe ~> Behaviour
+pipeBehaviour :: Pipe ~> BehaviourRep
 pipeBehaviour pipe = do
   mCache <- liftEffect $ Ref.read pipe.cache
   cache <- case mCache of
     Just cache -> pure cache
     Nothing -> do
-      Tuple subscription value <- liftEffect $ runRWEffect pipe.evaluate
+      Tuple subscription value <- liftEffect
+        $ runRWEffect pipe.evaluate
         $ Just
         $ mkExists
         $ PipeSubscriber pipe

@@ -17,10 +17,13 @@ import Data.Filterable
   )
 import Data.Int (odd)
 import Data.Maybe (Maybe)
+import Data.String (toUpper)
 import Test.Data.Observe (class Observable, (=-=))
 import Test.Effect.Reactive.Dual
   ( Event
   , Raff
+  , accumE
+  , accumMaybeE
   , interpretEffect
   , interpretEffect2
   , interpretModel
@@ -28,7 +31,7 @@ import Test.Effect.Reactive.Dual
   )
 import Test.QuickCheck (class Arbitrary)
 import Test.QuickCheck.Extra (quickCheckImpure)
-import Test.Spec (Spec, describe, it)
+import Test.Spec (Spec, describe, focus, it)
 import Type.Proxy (Proxy(..))
 
 int = Proxy :: Proxy Int
@@ -38,7 +41,7 @@ fIntString = Proxy :: Proxy (Int -> String)
 mInt = Proxy :: Proxy (Maybe Int)
 
 reactiveSpec :: Spec Unit
-reactiveSpec = describe "Effect.Reactive" do
+reactiveSpec = focus $ describe "Effect.Reactive" do
   describe "Event" do
     matchesModel "map" int (map $ add 1)
     matchesModel "compact" mInt compact
@@ -57,6 +60,10 @@ reactiveSpec = describe "Effect.Reactive" do
     matchesModel "nil" int (const $ map odd nil)
     matchesModel2 "apply" fIntString int apply
     matchesModel2 "aligned" int string aligned
+    matchesModel2 "append" string string append
+    matchesModel "mempty" string (const $ map toUpper mempty)
+    matchesModelM "accumE" int (accumE (+) 0)
+    matchesModelM "accumMaybeE" int (accumMaybeE (\b -> maybeBool (_ > b)) 0)
 
 matchesModel
   :: forall t o a b

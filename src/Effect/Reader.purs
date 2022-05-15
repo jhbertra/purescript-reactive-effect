@@ -3,6 +3,7 @@ module Effect.Reader where
 import Prelude
 
 import Control.Apply (lift2)
+import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Fix (class MonadFix, mfix)
 import Control.Monad.Reader (class MonadAsk, class MonadReader)
@@ -64,6 +65,9 @@ instance Semigroup a => Semigroup (ReaderEffect r a) where
 
 instance Monoid a => Monoid (ReaderEffect r a) where
   mempty = pure mempty
+
+instance Lazy (ReaderEffect r a) where
+  defer f = RE \r -> coerce f unit r
 
 runReaderEffect :: forall r a. ReaderEffect r a -> r -> Effect a
 runReaderEffect = coerce

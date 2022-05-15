@@ -7,7 +7,7 @@ import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
   ( BuildM
-  , Event
+  , EventRep
   , InitializeReaction
   , Reaction(..)
   , Reactor(..)
@@ -18,7 +18,7 @@ import Effect.Reactive.Internal
 import Effect.Reactive.Internal.Build (addReactor)
 import Effect.Ref.Maybe as RM
 
-_react :: forall a. Event a -> InitializeReaction a -> BuildM (Effect Unit)
+_react :: forall a. EventRep a -> InitializeReaction a -> BuildM (Effect Unit)
 _react event initialize = do
   connection <- liftEffect RM.empty
   subscriptionRef <- liftEffect RM.empty

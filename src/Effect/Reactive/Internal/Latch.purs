@@ -9,8 +9,8 @@ import Data.Patch (class Patch, applyPatch)
 import Data.WeakBag as WeakBag
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
-  ( Behaviour
-  , Event
+  ( BehaviourRep
+  , EventRep
   , Latch(..)
   , LatchUpdate(..)
   , PullHint(..)
@@ -33,7 +33,7 @@ newLatch
    . MonadBuild m
   => Patch patch a
   => a
-  -> Event patch
+  -> EventRep patch
   -> m (Latch a)
 newLatch initialValue updateOn = do
   parentRef <- liftEffect $ RM.empty
@@ -65,7 +65,7 @@ newLatch initialValue updateOn = do
           subscribers
       }
 
-latchBehaviour :: forall a. Latch a -> Behaviour a
+latchBehaviour :: forall a. Latch a -> BehaviourRep a
 latchBehaviour (Latch latch) = do
   value <- liftEffect $ Ref.read latch.value
   tellHint PullOnce
@@ -74,7 +74,7 @@ latchBehaviour (Latch latch) = do
   pure value
 
 -- TODO move to combinators
-stepper :: forall m a. MonadBuild m => a -> Event a -> m (Behaviour a)
+stepper :: forall m a. MonadBuild m => a -> EventRep a -> m (BehaviourRep a)
 stepper a e = do
   latch <- newLatch (Identity a) e
   pure $ coerce $ latchBehaviour latch

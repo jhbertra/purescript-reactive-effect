@@ -206,18 +206,22 @@ push f = over Event $ zipWithTime \ma t -> do
   a <- ma
   f a t
 
-foldPushE
+accumMaybeME
   :: forall a b. (a -> b -> Push (Maybe a)) -> a -> Event b -> Raff (Event a)
-foldPushE f a eb = mfix \ea -> do
+accumMaybeME f a eb = mfix \ea -> do
   b <- stepper a ea
   pure $ push identity $ (f <$> b) `applyE` eb
 
-foldMaybeE
-  :: forall a b. (a -> b -> Maybe a) -> a -> Event b -> Raff (Event a)
-foldMaybeE f = foldPushE \a -> pure <<< f a
+accumME
+  :: forall a b. (a -> b -> Push a) -> a -> Event b -> Raff (Event a)
+accumME f = accumMaybeME \a -> map Just <<< f a
 
-foldE :: forall a b. (a -> b -> a) -> a -> Event b -> Raff (Event a)
-foldE f = foldMaybeE \a -> Just <<< f a
+accumMaybeE
+  :: forall a b. (a -> b -> Maybe a) -> a -> Event b -> Raff (Event a)
+accumMaybeE f = accumMaybeME \a -> pure <<< f a
+
+accumE :: forall a b. (a -> b -> a) -> a -> Event b -> Raff (Event a)
+accumE f = accumMaybeE \a -> Just <<< f a
 
 foldPushB
   :: forall a b

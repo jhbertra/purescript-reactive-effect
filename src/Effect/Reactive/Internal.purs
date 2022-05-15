@@ -2,6 +2,7 @@ module Effect.Reactive.Internal where
 
 import Prelude
 
+import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Fix (class MonadFix)
 import Control.Monad.Reader (class MonadAsk, class MonadReader)
@@ -14,7 +15,7 @@ import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (for_, traverse_)
 import Data.Lazy (force)
 import Data.Lazy as DL
-import Data.Maybe (Maybe(..), maybe')
+import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype)
 import Data.OrderedBag (OrderedBag)
 import Data.Queue.Existential (ExistentialQueue)
@@ -41,7 +42,7 @@ import Safe.Coerce (coerce)
 -- Events
 -------------------------------------------------------------------------------
 
-type Event a = EventSubscriber a -> PropagateM (EventResult a)
+type EventRep a = EventSubscriber a -> PropagateM (EventResult a)
 
 type EventSubscriber a =
   { propagate :: a -> PropagateM Unit
@@ -76,9 +77,7 @@ invalidDepth = -2
 -- Behaviours
 -------------------------------------------------------------------------------
 
-type Behaviour a = PullM a
-
-type PullM = RWEffect PullEnv PullSubscription
+type BehaviourRep a = RWEffect PullEnv PullSubscription a
 
 type PullEnv = Maybe SomePullSubscriber
 
@@ -122,10 +121,10 @@ instance Semigroup PullSubscription where
 instance Monoid PullSubscription where
   mempty = Inactive
 
-tellHint :: PullHint -> PullM Unit
+tellHint :: PullHint -> BehaviourRep Unit
 tellHint hint = tell $ Active { hint, sources: CatNil, unsubscribe: pure unit }
 
-tellSource :: forall a. PullSource a -> PullM Unit
+tellSource :: forall a. PullSource a -> BehaviourRep Unit
 tellSource source = tell $
   Active
     { hint: PullOnce
@@ -133,7 +132,7 @@ tellSource source = tell $
     , unsubscribe: pure unit
     }
 
-trackSubscriber :: WeakBag (Exists PullSubscriber) -> PullM Unit
+trackSubscriber :: WeakBag (Exists PullSubscriber) -> BehaviourRep Unit
 trackSubscriber weakBag = RWE \mSubscriber subscription ->
   for_ mSubscriber \subscriber -> do
     ticket <- WeakBag.insert subscriber weakBag
@@ -160,7 +159,7 @@ newtype LatchUpdate a = LatchUpdate
 
 type Pipe a =
   { cache :: Ref (Maybe (PipeCache a))
-  , evaluate :: PullM a
+  , evaluate :: BehaviourRep a
   }
 
 type PipeCache a =
@@ -183,7 +182,7 @@ invalidatePipe pipe = do
       WeakBag.traverseMembers_ (runExists invalidatePullSubscriber) subscribers
     _ -> pure unit
 
-readBehaviourUntracked :: Behaviour ~> Effect
+readBehaviourUntracked :: BehaviourRep ~> Effect
 readBehaviourUntracked (RWE b) = do
   w <- Ref.new mempty
   b Nothing w
@@ -227,109 +226,6 @@ type AnimationInitialized =
   { dispose :: Effect Unit
   , invalidate :: Effect Unit
   }
-
--------------------------------------------------------------------------------
--- Merges
--------------------------------------------------------------------------------
-
-_mergeWithMaybeM
-  :: forall a b c
-   . (a -> PropagateM (Maybe c))
-  -> (b -> PropagateM (Maybe c))
-  -> (a -> b -> PropagateM (Maybe c))
-  -> Event a
-  -> Event b
-  -> Event c
-_mergeWithMaybeM mergeLeft mergeRight mergeBoth ea eb subscriber = do
-  occurrenceA <- liftEffect RM.empty
-  occurrenceB <- liftEffect RM.empty
-  propagated <- liftEffect $ Ref.new false
-  depthA <- liftEffect $ Ref.new invalidDepth
-  depthB <- liftEffect $ Ref.new invalidDepth
-  depth <- liftEffect $ Ref.new invalidDepth
-
-  resultA <- _subscribe ea
-    { propagate: \a -> do
-        writeNowClearLater a occurrenceA
-        myDepth <- liftEffect $ Ref.read depth
-        propagate myDepth $ unlessRaised propagated do
-          raiseNowClearLater propagated
-          mb <- liftEffect $ RM.read occurrenceB
-          mc <- maybe' (\_ -> mergeLeft a) (mergeBoth a) mb
-          traverse_ subscriber.propagate mc
-    , recalclateDepth: \newDepthA -> do
-        oldDepthA <- Ref.read depthA
-        unless (oldDepthA == newDepthA) do
-          Ref.write newDepthA depthA
-          depthB' <- Ref.read depthB
-          Ref.write ((max depthB' newDepthA) + 1) depth
-    }
-
-  resultB <- _subscribe eb
-    { propagate: \b -> do
-        writeNowClearLater b occurrenceB
-        myDepth <- liftEffect $ Ref.read depth
-        propagate myDepth $ unlessRaised propagated do
-          raiseNowClearLater propagated
-          ma <- liftEffect $ RM.read occurrenceA
-          mc <- maybe' (\_ -> mergeRight b) (\a -> mergeBoth a b) ma
-          traverse_ subscriber.propagate mc
-    , recalclateDepth: \newDepthB -> do
-        oldDepthB <- Ref.read depthB
-        unless (oldDepthB == newDepthB) do
-          Ref.write newDepthB depthB
-          depthA' <- Ref.read depthA
-          Ref.write ((max depthA' newDepthB) + 1) depth
-    }
-
-  liftEffect do
-    depthA' <- Ref.read resultA.subscription.depth
-    depthB' <- Ref.read resultB.subscription.depth
-    Ref.write depthA' depthA
-    Ref.write depthB' depthB
-    Ref.write ((max depthA' depthB') + 1) depth
-
-  frameDepth <- currentDepth
-  myDepth <- liftEffect $ Ref.read depth
-  let ma = resultA.occurrence
-  let mb = resultB.occurrence
-  occurrence <-
-    if frameDepth >= myDepth then
-      -- If this event should have already fired
-      -- calculate the occurrence from the results read from the parents,
-      -- as they should have already propagated this frame if firing, and
-      -- return it.
-      case ma, mb of
-        Just a, Just b -> mergeBoth a b
-        Just a, Nothing -> mergeLeft a
-        Nothing, Just b -> mergeRight b
-        _, _ -> pure Nothing
-    else do
-      -- Run the initial merge later, when the depth is right. The parents
-      -- may not have propagad yet, so the readings will be inaccurate
-      -- until they have. We still need to write an occurrence that has
-      -- occurred now.
-      for_ ma \a -> writeNowClearLater a occurrenceA
-      for_ mb \b -> writeNowClearLater b occurrenceB
-      propagate myDepth do
-        occA <- liftEffect $ RM.read occurrenceA
-        occB <- liftEffect $ RM.read occurrenceB
-        traverse_ subscriber.propagate =<< case occA, occB of
-          Just a, Just b -> mergeBoth a b
-          Just a, Nothing -> mergeLeft a
-          Nothing, Just b -> mergeRight b
-          _, _ -> pure Nothing
-      pure Nothing
-
-  pure
-    { occurrence
-    , subscription:
-        { depth
-        , unsubscribe: do
-            resultA.subscription.unsubscribe
-            resultB.subscription.unsubscribe
-        }
-    }
 
 -------------------------------------------------------------------------------
 -- Graph nodes
@@ -413,6 +309,7 @@ derive newtype instance MonadAsk BuildEnv BuildM
 derive newtype instance MonadReader BuildEnv BuildM
 derive newtype instance Semigroup a => Semigroup (BuildM a)
 derive newtype instance Monoid a => Monoid (BuildM a)
+derive newtype instance Lazy (BuildM a)
 
 -------------------------------------------------------------------------------
 -- Propagate
@@ -495,58 +392,14 @@ propagations :: PropagateM (PriorityQueue (PropagateM Unit))
 propagations = PM $ RE \env -> pure env.propagations
 
 -------------------------------------------------------------------------------
--- Combinators - Event
+-- Combinators - EventRep
 -------------------------------------------------------------------------------
 
-type CachedSubscription a =
-  { subscribers :: WeakBag (EventSubscriber a)
-  , parent :: EventSubscription
-  , occurrence :: MaybeRef a
-  }
-
-cached :: Event ~> Event
-cached event = unsafePerformEffect do
-  cacheRef <- RM.empty
-  pure \subscriber -> do
-    mCache <- liftEffect $ RM.read cacheRef
-    cache <- case mCache of
-      Just cache -> pure cache
-      Nothing -> do
-        parentSubRef <- liftEffect $ RM.empty
-        occurrence <- liftEffect $ RM.empty
-        subscribers <- liftEffect $ WeakBag.new do
-          RM.clear cacheRef
-          parentSub <- RM.read parentSubRef
-          RM.clear parentSubRef
-          traverse_ _.unsubscribe parentSub
-        result <- _subscribe event
-          { propagate: \a -> do
-              writeNowClearLater a occurrence
-              WeakBag.traverseMembers_ (\s -> s.propagate a) subscribers
-          , recalclateDepth: \depth -> WeakBag.traverseMembers_
-              (\s -> s.recalclateDepth depth)
-              subscribers
-          }
-        liftEffect $ RM.write result.subscription parentSubRef
-        traverse_ (flip writeNowClearLater occurrence) result.occurrence
-        let cache = { subscribers, parent: result.subscription, occurrence }
-        liftEffect $ RM.write cache cacheRef
-        pure cache
-    ticket <- liftEffect $ WeakBag.insert subscriber cache.subscribers
-    occurrence <- liftEffect $ RM.read cache.occurrence
-    pure
-      { occurrence
-      , subscription:
-          { depth: cache.parent.depth
-          , unsubscribe: WeakBag.destroyTicket ticket
-          }
-      }
-
 _subscribe
-  :: forall a. Event a -> EventSubscriber a -> PropagateM (EventResult a)
+  :: forall a. EventRep a -> EventSubscriber a -> PropagateM (EventResult a)
 _subscribe = identity
 
-getEventHandle :: forall a. Event a -> PropagateM (EventHandle a)
+getEventHandle :: forall a. EventRep a -> PropagateM (EventHandle a)
 getEventHandle event = do
   currentValue <- liftEffect RM.empty
   { occurrence, subscription } <- _subscribe event $ terminalSubscriber \a ->
@@ -554,7 +407,7 @@ getEventHandle event = do
   for_ occurrence \a -> writeNowClearLater a currentValue
   pure { currentValue, subscription }
 
-_pushRaw :: forall a b. (a -> PropagateM (Maybe b)) -> Event a -> Event b
+_pushRaw :: forall a b. (a -> PropagateM (Maybe b)) -> EventRep a -> EventRep b
 _pushRaw f e1 sub = do
   result <- _subscribe e1 sub
     { propagate = traverse_ sub.propagate <=< f
@@ -562,10 +415,7 @@ _pushRaw f e1 sub = do
   occurrence <- traverse f result.occurrence
   pure result { occurrence = join occurrence }
 
-_push :: forall a b. (a -> PropagateM (Maybe b)) -> Event a -> Event b
-_push f = cached <<< _pushRaw f
-
-_neverE :: forall a. Event a
+_neverE :: forall a. EventRep a
 _neverE = const $ pure $
   { occurrence: Nothing
   , subscription: { depth: zeroDepth, unsubscribe: mempty }

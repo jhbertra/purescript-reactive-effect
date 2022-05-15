@@ -11,7 +11,7 @@ import Effect (Effect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
   ( AnimationInitialized
-  , Behaviour
+  , BehaviourRep
   , PullSubscriber(..)
   , PullSubscription
   )
@@ -23,7 +23,7 @@ type InitializeAnimation a =
   -> Effect AnimationInitialized
 
 animate
-  :: forall a. Behaviour a -> InitializeAnimation a -> Effect (Effect Unit)
+  :: forall a. BehaviourRep a -> InitializeAnimation a -> Effect (Effect Unit)
 animate behaviour initialize = do
   _.dispose <<< force <$> mfix \linitialized -> do
     let

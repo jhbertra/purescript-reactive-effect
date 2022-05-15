@@ -13,7 +13,7 @@ import Effect (Effect)
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
   ( BuildM
-  , Event
+  , EventRep
   , FireTriggers(..)
   , InvokeTrigger(..)
   , getEventHandle
@@ -29,14 +29,14 @@ import Effect.Ref.Maybe as RM
 
 interpret
   :: forall a b
-   . (Event a -> BuildM (Event b))
+   . (EventRep a -> BuildM (EventRep b))
   -> Array (Maybe a)
   -> Effect (Array (Maybe b))
 interpret f as = interpret2 (\e _ -> f e) as []
 
 interpret2
   :: forall a b c
-   . (Event a -> Event b -> BuildM (Event c))
+   . (EventRep a -> EventRep b -> BuildM (EventRep c))
   -> Array (Maybe a)
   -> Array (Maybe b)
   -> Effect (Array (Maybe c))

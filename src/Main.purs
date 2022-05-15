@@ -10,7 +10,6 @@ import Data.Int (odd)
 import Data.Maybe (Maybe(..))
 import Data.Time.Duration (Seconds(..))
 import Effect (Effect)
-import Effect.Aff (launchAff_)
 import Effect.Exception (throw)
 import Effect.Reactive
   ( Event
@@ -19,9 +18,9 @@ import Effect.Reactive
   , bracketReact
   , indexed_
   , intervalEvent
+  , launchRaff_
   , liftSample2
   , nowEvent
-  , runRaff
   , stepper
   , (<&)
   )
@@ -35,7 +34,7 @@ import Web.HTML.HTMLElement as HE
 import Web.HTML.Window (document)
 
 main :: Effect Unit
-main = launchAff_ $ void $ runRaff do
+main = launchRaff_ do
   e <- indexed_ =<< (lift2 (<|>) nowEvent $ intervalEvent $ Seconds 1.0)
   let e1 = filter (eq 0 <<< (_ `mod` 3)) e
   let e2 = filter odd e

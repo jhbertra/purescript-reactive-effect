@@ -4,28 +4,14 @@ import Prelude
 
 import Data.Foldable (traverse_)
 import Data.Maybe (Maybe(..))
-import Data.WeakBag (WeakBag)
 import Data.WeakBag as WeakBag
 import Effect.Class (liftEffect)
-import Effect.Reactive.Internal
-  ( Event
-  , EventSubscriber
-  , EventSubscription
-  , _subscribe
-  , writeNowClearLater
-  )
-import Effect.Ref.Maybe (MaybeRef)
+import Effect.Reactive.Internal (EventRep, _subscribe, writeNowClearLater)
 import Effect.Ref.Maybe as RM
 import Effect.Unsafe (unsafePerformEffect)
 
-type CachedSubscription a =
-  { subscribers :: WeakBag (EventSubscriber a)
-  , parent :: EventSubscription
-  , occurrence :: MaybeRef a
-  }
-
-cached :: Event ~> Event
-cached event = unsafePerformEffect do
+_cached :: EventRep ~> EventRep
+_cached event = unsafePerformEffect do
   cacheRef <- RM.empty
   pure \subscriber -> do
     mCache <- liftEffect $ RM.read cacheRef
