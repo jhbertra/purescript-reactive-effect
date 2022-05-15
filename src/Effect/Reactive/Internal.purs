@@ -46,13 +46,13 @@ type EventRep a = EventSubscriber a -> PropagateM (EventResult a)
 
 type EventSubscriber a =
   { propagate :: a -> PropagateM Unit
-  , recalclateDepth :: Int -> Effect Unit
+  , recalculateDepth :: Int -> Effect Unit
   }
 
 terminalSubscriber :: forall a. (a -> PropagateM Unit) -> EventSubscriber a
 terminalSubscriber f =
   { propagate: f
-  , recalclateDepth: mempty
+  , recalculateDepth: mempty
   }
 
 type EventResult a =
@@ -87,6 +87,7 @@ data PullSource a
 
 data PullSubscriber a
   = PipeSubscriber (Pipe a)
+  | SwitchSubscriber (DL.Lazy (SwitchCache a))
   | AnimationSubscriber Int (DL.Lazy AnimationInitialized)
 
 data PullHint
@@ -153,7 +154,7 @@ newtype Latch a = Latch
 
 newtype LatchUpdate a = LatchUpdate
   { valueRef :: Ref a
-  , invalidateOld :: Effect Unit
+  , invalidateOld :: ExistentialQueue SwitchCache -> Effect Unit
   , newValue :: a
   }
 
@@ -168,18 +169,23 @@ type PipeCache a =
   , subscription :: PullSubscription
   }
 
-invalidatePullSubscriber :: forall a. PullSubscriber a -> Effect Unit
-invalidatePullSubscriber = case _ of
-  PipeSubscriber pipe -> invalidatePipe pipe
+invalidatePullSubscriber
+  :: forall a. ExistentialQueue SwitchCache -> PullSubscriber a -> Effect Unit
+invalidatePullSubscriber switchesInvalidated = case _ of
+  PipeSubscriber pipe -> invalidatePipe switchesInvalidated pipe
+  SwitchSubscriber switch -> EQ.enqueue (force switch) switchesInvalidated
   AnimationSubscriber _ animation -> (force animation).invalidate
 
-invalidatePipe :: forall a. Pipe a -> Effect Unit
-invalidatePipe pipe = do
+invalidatePipe
+  :: forall a. ExistentialQueue SwitchCache -> Pipe a -> Effect Unit
+invalidatePipe switchesInvalidated pipe = do
   mCache <- Ref.read pipe.cache
   case mCache of
     Just { subscribers } -> do
       Ref.write Nothing pipe.cache
-      WeakBag.traverseMembers_ (runExists invalidatePullSubscriber) subscribers
+      WeakBag.traverseMembers_
+        (runExists (invalidatePullSubscriber switchesInvalidated))
+        subscribers
     _ -> pure unit
 
 readBehaviourUntracked :: BehaviourRep ~> Effect
@@ -235,6 +241,20 @@ type CacheResult cache a =
   { ticket :: WeakBagTicket (EventSubscriber a)
   , cache :: cache
   , occurrence :: Maybe a
+  }
+
+type Switch a =
+  { parent :: BehaviourRep (EventRep a)
+  , cache :: MaybeRef (SwitchCache a)
+  }
+
+newtype SwitchCache a = SwitchCache
+  { occurrence :: MaybeRef a
+  , depth :: Ref Int
+  , subscribers :: WeakBag (EventSubscriber a)
+  , subscription :: Ref PullSubscription
+  , currentParent :: Ref EventSubscription
+  , parent :: BehaviourRep (EventRep a)
   }
 
 wrapSubscribeCached

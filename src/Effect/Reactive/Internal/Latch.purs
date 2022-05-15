@@ -60,8 +60,8 @@ newLatch initialValue updateOn = do
     for_ (applyPatch patch oldValue) \newValue -> updateLatch $ LatchUpdate
       { valueRef
       , newValue
-      , invalidateOld: WeakBag.traverseMembers_
-          (runExists invalidatePullSubscriber)
+      , invalidateOld: \switchesInvalidated -> WeakBag.traverseMembers_
+          (runExists (invalidatePullSubscriber switchesInvalidated))
           subscribers
       }
 

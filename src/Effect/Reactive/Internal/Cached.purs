@@ -29,8 +29,8 @@ _cached event = unsafePerformEffect do
           { propagate: \a -> do
               writeNowClearLater a occurrence
               WeakBag.traverseMembers_ (\s -> s.propagate a) subscribers
-          , recalclateDepth: \depth -> WeakBag.traverseMembers_
-              (\s -> s.recalclateDepth depth)
+          , recalculateDepth: \depth -> WeakBag.traverseMembers_
+              (\s -> s.recalculateDepth depth)
               subscribers
           }
         liftEffect $ RM.write result.subscription parentSubRef

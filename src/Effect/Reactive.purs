@@ -68,6 +68,8 @@ module Effect.Reactive
   , sampleApplyMaybe
   , split
   , stepper
+  , switch
+  , switchE
   , switcher
   , tag
   , tagMaybe
@@ -137,9 +139,11 @@ import Effect.Reactive.Internal.Latch (latchBehaviour, newLatch)
 import Effect.Reactive.Internal.Merge (_mergeWithMaybeM) as Internal
 import Effect.Reactive.Internal.Pipe (_pull)
 import Effect.Reactive.Internal.Reaction (_react)
+import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
 import Effect.Ref.Maybe as RM
 import Effect.Unlift (class MonadUnliftEffect, askUnliftEffect, unliftEffect)
+import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 
 -------------------------------------------------------------------------------
@@ -552,6 +556,14 @@ mapAccumMaybeM_
   -> m (Event t c)
 mapAccumMaybeM_ f b e = _.value <$> mapAccumMaybeMB f b e
 
+switchE
+  :: forall t m a
+   . MonadRaff t m
+  => Event t a
+  -> Event t (Event t a)
+  -> m (Event t a)
+switchE e0 ee = switch <$> stepper e0 ee
+
 -------------------------------------------------------------------------------
 -- Behaviours
 -------------------------------------------------------------------------------
@@ -825,6 +837,11 @@ mapAccumMaybeMB f seed ea = do
     accum' <- stepper seed $ filterMap _.accum eaccum
     pure $ Tuple eaccum accum'
   pure { accum, value: filterMap _.value eaccum }
+
+switch :: forall t a. Behaviour t (Event t a) -> Event t a
+switch (Behaviour parent) = unsafePerformEffect do
+  cache <- RM.empty
+  pure $ Event $ switchEvent { parent: coerce parent, cache }
 
 -------------------------------------------------------------------------------
 -- Testing

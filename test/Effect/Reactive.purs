@@ -41,7 +41,7 @@ fIntString = Proxy :: Proxy (Int -> String)
 mInt = Proxy :: Proxy (Maybe Int)
 
 reactiveSpec :: Spec Unit
-reactiveSpec = focus $ describe "Effect.Reactive" do
+reactiveSpec = describe "Effect.Reactive" do
   describe "Event" do
     matchesModel "map" int (map $ add 1)
     matchesModel "compact" mInt compact

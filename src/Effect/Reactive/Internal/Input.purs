@@ -71,7 +71,7 @@ subscribeInputCached input subscriber = do
     mCache <- RM.read cacheRef
     for_ mCache \(InputCache cache) -> do
       cache.finalize
-      RM.clear cache.input.cache
+      RM.clear cacheRef
 
 inputEvent :: forall a. Input a -> EventRep a
 inputEvent input = wrapSubscribeCached (const zeroDepth)

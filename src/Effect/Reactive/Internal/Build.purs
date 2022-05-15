@@ -4,13 +4,16 @@ import Prelude
 
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (for_)
+import Data.Maybe (Maybe(..))
 import Data.OrderedBag (inOrder)
 import Data.OrderedBag as OB
 import Data.Queue.Existential as EQ
 import Data.Queue.Priority as PQ
+import Data.Tuple (Tuple(..))
 import Data.WeakBag as WeakBag
 import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
+import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
   ( BuildM(..)
   , Clear(..)
@@ -20,13 +23,18 @@ import Effect.Reactive.Internal
   , LatchUpdate(..)
   , PropagateEnv
   , PropagateM(..)
+  , PullSubscriber(..)
+  , PullSubscription(..)
   , Reaction(..)
   , Reactor(..)
+  , SwitchCache(..)
+  , _subscribe
   , currentDepth
   , propagations
   , updateDepth
   , writeNowClearLater
   )
+import Effect.Reactive.Internal.Switch (switchSubscriber)
 import Effect.Reader (ReaderEffect(..), runReaderEffect)
 import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
@@ -83,6 +91,7 @@ runFrame frame = BM $ RE \buildEnv -> do
   clears <- EQ.new
   reactions <- EQ.new
   latchUpdates <- EQ.new
+  switchesInvalidated <- EQ.new
   currentDepthRef <- Ref.new $ -1
   propagationsQ <- PQ.new
   let
@@ -102,6 +111,9 @@ runFrame frame = BM $ RE \buildEnv -> do
   result <- runPropagateM propagateEnv do
     u <- askUnliftEffect
     result <- frame
+    -- At this point we are done propagating in this frame. Even if we run
+    -- actions that call propagate, we just ignore them, because it's unsafe to
+    -- further propagate events after updating latch values.
     -- Initialize latches (assume there won't be any more propagations).
     liftEffect $ EQ.drain buildEnv.newLatches \(Latch { initialize }) ->
       unliftEffect u initialize
@@ -117,7 +129,30 @@ runFrame frame = BM $ RE \buildEnv -> do
   EQ.drain latchUpdates case _ of
     LatchUpdate { valueRef, invalidateOld, newValue } -> do
       Ref.write newValue valueRef
-      invalidateOld
+      invalidateOld switchesInvalidated
+  -- Reconnect invalidated switches (assume there won't be any more propagations).
+  EQ.drain switchesInvalidated \(SwitchCache cache) -> do
+    -- switch off old parent
+    oldParent <- Ref.read cache.currentParent
+    oldSubscription <- Ref.read cache.subscription
+    case oldSubscription of
+      Active { unsubscribe } -> unsubscribe
+      _ -> pure unit
+    oldParent.unsubscribe
+    -- pull new parent
+    Tuple pullSubscription e <- runRWEffect cache.parent
+      $ Just
+      $ mkExists
+      $ SwitchSubscriber
+      $ pure
+      $ SwitchCache cache
+    Ref.write pullSubscription cache.subscription
+    -- switch to new parent
+    let subscriber = switchSubscriber $ pure $ SwitchCache cache
+    { subscription } <- runPropagateM propagateEnv $ _subscribe e $ subscriber
+    newDepth <- Ref.read subscription.depth
+    subscriber.recalculateDepth newDepth
+    Ref.write subscription cache.currentParent
   -- Run raised reactions
   reactionsArray <- EQ.toArray reactions
   orderedReactions <-
