@@ -23,10 +23,6 @@ import Effect.Reactive.Internal.Input (inputEvent, newInputWithTriggerRef)
 import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
 
--------------------------------------------------------------------------------
--- Testing
--------------------------------------------------------------------------------
-
 interpret
   :: forall a b
    . (EventRep a -> BuildM (EventRep b))

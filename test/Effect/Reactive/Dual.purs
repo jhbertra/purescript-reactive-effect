@@ -4,7 +4,7 @@ import Prelude
 
 import Control.Alt (class Alt, (<|>))
 import Control.Alternative (empty)
-import Control.Lazy (defer)
+import Control.Lazy (class Lazy, defer)
 import Control.Monad.Fix (class MonadFix, mfix)
 import Control.Plus (class Plus)
 import Data.Align (class Align, class Alignable, align, nil)
@@ -135,6 +135,25 @@ instance Semigroup a => Semigroup (Event t a) where
 instance Semigroup a => Monoid (Event t a) where
   mempty = E mempty mempty
 
+instance Lazy (Event t a) where
+  defer f =
+    E (defer \_ -> case f unit of E m _ -> m)
+      (defer \_ -> case f unit of E _ e -> e)
+
+instance Functor (Behaviour t) where
+  map f (B m e) = B (map f m) (map f e)
+
+instance Apply (Behaviour t) where
+  apply (B m1 e1) (B m2 e2) = B (m1 <*> m2) (e1 <*> e2)
+
+instance Applicative (Behaviour t) where
+  pure a = B (pure a) (pure a)
+
+instance Lazy (Behaviour t a) where
+  defer f =
+    B (defer \_ -> case f unit of B m _ -> m)
+      (defer \_ -> case f unit of B _ b -> b)
+
 interpretModel
   :: forall t a b
    . (Event t a -> Raff t (Event t b))
@@ -217,3 +236,56 @@ accumMaybeME
 accumMaybeME f i (E m e) = R
   (liftEM <$> M.accumMaybeME (\b a -> case f b a of RP p _ -> p) i m)
   (liftER <$> R.accumMaybeME (\b a -> case f b a of RP _ r -> r) i e)
+
+accumB
+  :: forall t a b
+   . (b -> a -> b)
+  -> b
+  -> Event t a
+  -> Raff t (Behaviour t b)
+accumB f i (E m e) = R (liftBM <$> M.accumB f i m) (liftBR <$> R.accumB f i e)
+
+accumMB
+  :: forall t a b
+   . (b -> a -> Push t b)
+  -> b
+  -> Event t a
+  -> Raff t (Behaviour t b)
+accumMB f i (E m e) = R
+  (liftBM <$> M.accumMB (\b a -> case f b a of RP p _ -> p) i m)
+  (liftBR <$> R.accumMB (\b a -> case f b a of RP _ r -> r) i e)
+
+accumMaybeB
+  :: forall t a b
+   . (b -> a -> Maybe b)
+  -> b
+  -> Event t a
+  -> Raff t (Behaviour t b)
+accumMaybeB f i (E m e) = R
+  (liftBM <$> M.accumMaybeB f i m)
+  (liftBR <$> R.accumMaybeB f i e)
+
+accumMaybeMB
+  :: forall t a b
+   . (b -> a -> Push t (Maybe b))
+  -> b
+  -> Event t a
+  -> Raff t (Behaviour t b)
+accumMaybeMB f i (E m e) = R
+  (liftBM <$> M.accumMaybeMB (\b a -> case f b a of RP p _ -> p) i m)
+  (liftBR <$> R.accumMaybeMB (\b a -> case f b a of RP _ r -> r) i e)
+
+switch :: forall t a. Behaviour t (Event t a) -> Event t a
+switch (B m b) =
+  E (M.switch $ (\(E m' _) -> m') <$> m) (R.switch $ (\(E _ e) -> e) <$> b)
+
+stepper :: forall t a. a -> Event t a -> Raff t (Behaviour t a)
+stepper i (E m e) = R (liftBM <$> M.stepper i m) (liftBR <$> R.stepper i e)
+
+gate :: forall t a. Behaviour t Boolean -> Event t a -> Event t a
+gate (B mb b) (E me e) = E (M.gate mb me) (R.gate b e)
+
+liftSample2
+  :: forall t a b c. (a -> b -> c) -> Behaviour t a -> Event t b -> Event t c
+liftSample2 f (B mb b) (E me e) =
+  E (M.liftSample2 f mb me) (R.liftSample2 f b e)

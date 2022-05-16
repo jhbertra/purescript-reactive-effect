@@ -39,7 +39,7 @@ const members =
 
 function destroyWeakBagTicket(weakBag, ticket) {
   return function () {
-    weakBag.members.delete(key);
+    weakBag.members.delete(ticket.key);
     ticket.isDestroyed = true;
     ticket.destroy = function () {
       throw new Error("WeakBagTicket is destroyed");

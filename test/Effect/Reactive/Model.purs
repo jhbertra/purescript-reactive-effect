@@ -11,11 +11,12 @@ import Control.Monad.Gen (chooseInt)
 import Control.Plus (empty)
 import Data.Align (class Align, class Alignable, align)
 import Data.Array as Array
-import Data.Compactable (class Compactable, separateDefault)
+import Data.Compactable (class Compactable, compact, separateDefault)
 import Data.Filterable
   ( class Filterable
   , filterDefault
   , filterMapDefault
+  , maybeBool
   , partitionDefault
   , partitionMapDefault
   )
@@ -210,7 +211,7 @@ accumMaybeME
   :: forall a b. (a -> b -> Push (Maybe a)) -> a -> Event b -> Raff (Event a)
 accumMaybeME f a eb = mfix \ea -> do
   b <- stepper a ea
-  pure $ push identity $ (f <$> b) `applyE` eb
+  pure $ push identity $ (f <$> b) `sampleApply` eb
 
 accumME
   :: forall a b. (a -> b -> Push a) -> a -> Event b -> Raff (Event a)
@@ -223,22 +224,26 @@ accumMaybeE f = accumMaybeME \a -> pure <<< f a
 accumE :: forall a b. (a -> b -> a) -> a -> Event b -> Raff (Event a)
 accumE f = accumMaybeE \a -> Just <<< f a
 
-foldPushB
+accumMaybeMB
   :: forall a b
    . (a -> b -> Push (Maybe a))
   -> a
   -> Event b
   -> Raff (Behaviour a)
-foldPushB f a eb = mfix \b -> do
-  let ea = push identity $ (f <$> b) `applyE` eb
+accumMaybeMB f a eb = mfix \b -> do
+  let ea = push identity $ (f <$> b) `sampleApply` eb
   stepper a ea
 
-foldMaybeB
-  :: forall a b. (a -> b -> Maybe a) -> a -> Event b -> Raff (Behaviour a)
-foldMaybeB f = foldPushB \a -> pure <<< f a
+accumMB
+  :: forall a b. (a -> b -> Push a) -> a -> Event b -> Raff (Behaviour a)
+accumMB f = accumMaybeMB \a -> map Just <<< f a
 
-foldB :: forall a b. (a -> b -> a) -> a -> Event b -> Raff (Behaviour a)
-foldB f = foldMaybeB \a -> Just <<< f a
+accumMaybeB
+  :: forall a b. (a -> b -> Maybe a) -> a -> Event b -> Raff (Behaviour a)
+accumMaybeB f = accumMaybeMB \a -> pure <<< f a
+
+accumB :: forall a b. (a -> b -> a) -> a -> Event b -> Raff (Behaviour a)
+accumB f = accumMaybeB \a -> Just <<< f a
 
 zipWithTime :: forall a b. (a -> Time -> b) -> List a -> List b
 zipWithTime f as = Lazy.zipWith f as $ Lazy.iterate (_ + 1) 0
@@ -291,8 +296,15 @@ switchEImmediately e0 ee = do
   e <- switchE e0 ee
   pure $ join ee <|> e
 
-applyE :: forall a b. Behaviour (a -> b) -> Event a -> Event b
-applyE = over Event <<< Lazy.zipWith map <<< unwrap
+liftSample2 :: forall a b c. (a -> b -> c) -> Behaviour a -> Event b -> Event c
+liftSample2 f (Behaviour b) (Event e) =
+  Event $ Lazy.zipWith (\a mb -> f a <$> mb) b e
+
+sampleApply :: forall a b. Behaviour (a -> b) -> Event a -> Event b
+sampleApply = liftSample2 ($)
+
+gate :: forall a. Behaviour Boolean -> Event a -> Event a
+gate = map compact <<< liftSample2 (maybeBool <<< const)
 
 modelSpec :: Spec Unit
 modelSpec = do
@@ -334,7 +346,7 @@ combinatorSpec = describe "Effect.Reactive.Model" do
         a :: Identity A <- arbitrary
         e <- arbitrary
         t <- chooseInt 0 10
-        let patcher' = foldMaybeB (flip applyPatch)
+        let patcher' = accumMaybeB (flip applyPatch)
         pure $ patcher' a e t =-= (patcher a e t)
   describe "stepper" do
     it "prepends the initialValue to the stream" do
