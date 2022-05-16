@@ -23,12 +23,23 @@ const _read = function ({ nothing, just }) {
   };
 };
 
-const modifyImpl = function (f) {
-  return function (ref) {
-    return function () {
-      var t = f(ref.value);
-      ref.value = t.state;
-      return t.value;
+const modifyImpl = function (def) {
+  return function (f) {
+    return function (ref) {
+      return function () {
+        var t;
+        if (ref.hasOwnProperty("value")) {
+          t = f(ref.value);
+        } else {
+          t = def();
+        }
+        if (t.hasOwnProperty("value0")) {
+          ref.value = t.state.value0;
+        } else {
+          delete ref.value;
+        }
+        return t.value;
+      };
     };
   };
 };

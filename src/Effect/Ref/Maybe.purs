@@ -55,7 +55,8 @@ read = _read { just: Just, nothing: Nothing }
 
 foreign import modifyImpl
   :: forall s b
-   . (Maybe s -> { state :: Maybe s, value :: b })
+   . (Unit -> { state :: Maybe s, value :: b })
+  -> (s -> { state :: Maybe s, value :: b })
   -> MaybeRef s
   -> Effect b
 
@@ -66,7 +67,7 @@ modify'
    . (Maybe s -> { state :: Maybe s, value :: b })
   -> MaybeRef s
   -> Effect b
-modify' = modifyImpl
+modify' f = modifyImpl (\_ -> f Nothing) (f <<< Just)
 
 -- | Update the value of a mutable reference by applying a function
 -- | to the current value. The updated value is returned.
