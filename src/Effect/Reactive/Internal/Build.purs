@@ -3,7 +3,8 @@ module Effect.Reactive.Internal.Build where
 import Prelude
 
 import Data.Exists (Exists, mkExists, runExists)
-import Data.Foldable (for_)
+import Data.Foldable (for_, traverse_)
+import Data.Lazy (force)
 import Data.Maybe (Maybe(..))
 import Data.OrderedBag (inOrder)
 import Data.OrderedBag as OB
@@ -19,6 +20,7 @@ import Effect.Reactive.Internal
   , Clear(..)
   , FireTriggers
   , InvokeTrigger(..)
+  , JoinReset(..)
   , Latch(..)
   , LatchUpdate(..)
   , PropagateEnv
@@ -34,6 +36,7 @@ import Effect.Reactive.Internal
   , updateDepth
   , writeNowClearLater
   )
+import Effect.Reactive.Internal.Join (recalculateJoinDepth)
 import Effect.Reactive.Internal.Switch (switchSubscriber)
 import Effect.Reader (ReaderEffect(..), runReaderEffect)
 import Effect.Ref as Ref
@@ -92,6 +95,7 @@ runFrame frame = BM $ RE \buildEnv -> do
   reactions <- EQ.new
   latchUpdates <- EQ.new
   switchesInvalidated <- EQ.new
+  joinResets <- EQ.new
   currentDepthRef <- Ref.new $ -1
   propagationsQ <- PQ.new
   let
@@ -104,6 +108,7 @@ runFrame frame = BM $ RE \buildEnv -> do
       , clears
       , reactions
       , latchUpdates
+      , joinResets
       , currentDepth: currentDepthRef
       , propagations: propagationsQ
       }
@@ -153,6 +158,10 @@ runFrame frame = BM $ RE \buildEnv -> do
     newDepth <- Ref.read subscription.depth
     subscriber.recalculateDepth newDepth
     Ref.write subscription cache.currentParent
+  -- Reset joins
+  EQ.drain joinResets \(JoinReset { cache, subscription }) -> do
+    subscription.unsubscribe
+    traverse_ (recalculateJoinDepth <<< force) cache
   -- Run raised reactions
   reactionsArray <- EQ.toArray reactions
   orderedReactions <-

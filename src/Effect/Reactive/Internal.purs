@@ -269,6 +269,25 @@ newtype MapFanCache k v = MapFanCache
   , subscription :: EventSubscription
   }
 
+type Join a =
+  { parent :: EventRep (EventRep a)
+  , cache :: MaybeRef (JoinCache a)
+  }
+
+newtype JoinCache a = JoinCache
+  { occurrence :: MaybeRef a
+  , depth :: Ref Int
+  , subscribers :: WeakBag (EventSubscriber a)
+  , outerSubscriber :: EventSubscriber (EventRep a)
+  , outerSubscription :: EventSubscription
+  , innerSubscription :: MaybeRef EventSubscription
+  }
+
+newtype JoinReset a = JoinReset
+  { subscription :: EventSubscription
+  , cache :: Maybe (DL.Lazy (JoinCache a))
+  }
+
 wrapSubscribeCached
   :: forall cache a m
    . MonadEffect m
@@ -360,6 +379,7 @@ type PropagateEnv = BuildEnv'
   , propagations :: PriorityQueue (PropagateM Unit)
   , reactions :: ExistentialQueue Reaction
   , latchUpdates :: ExistentialQueue LatchUpdate
+  , joinResets :: ExistentialQueue JoinReset
   )
 
 data Clear a
@@ -393,6 +413,14 @@ updateDepth newDepth =
 updateLatch :: forall a. LatchUpdate a -> PropagateM Unit
 updateLatch latchUpdate =
   PM $ RE \env -> EQ.enqueue latchUpdate env.latchUpdates
+
+resetJoin
+  :: forall a
+   . EventSubscription
+  -> Maybe (DL.Lazy (JoinCache a))
+  -> PropagateM Unit
+resetJoin subscription cache = PM $ RE \env ->
+  EQ.enqueue (JoinReset { subscription, cache }) env.joinResets
 
 clearLater :: forall a. Clear a -> PropagateM Unit
 clearLater clear = PM $ RE \env -> EQ.enqueue clear env.clears

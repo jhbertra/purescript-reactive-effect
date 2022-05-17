@@ -39,11 +39,17 @@ _mergeWithMaybeM mergeLeft mergeRight mergeBoth ea eb subscriber = do
     { propagate: \a -> do
         writeNowClearLater a occurrenceA
         myDepth <- liftEffect $ Ref.read depth
-        propagate myDepth $ unlessRaised propagated do
-          raiseNowClearLater propagated
-          mb <- liftEffect $ RM.read occurrenceB
-          mc <- maybe' (\_ -> mergeLeft a) (mergeBoth a) mb
-          traverse_ subscriber.propagate mc
+        let
+          go = unlessRaised propagated do
+            myDepth' <- liftEffect $ Ref.read depth
+            case compare myDepth myDepth' of
+              EQ -> do
+                raiseNowClearLater propagated
+                mb <- liftEffect $ RM.read occurrenceB
+                mc <- maybe' (\_ -> mergeLeft a) (mergeBoth a) mb
+                traverse_ subscriber.propagate mc
+              _ -> propagate myDepth' go
+        propagate myDepth go
     , recalculateDepth: \newDepthA -> do
         oldDepthA <- Ref.read depthA
         unless (oldDepthA == newDepthA) do
@@ -56,11 +62,17 @@ _mergeWithMaybeM mergeLeft mergeRight mergeBoth ea eb subscriber = do
     { propagate: \b -> do
         writeNowClearLater b occurrenceB
         myDepth <- liftEffect $ Ref.read depth
-        propagate myDepth $ unlessRaised propagated do
-          raiseNowClearLater propagated
-          ma <- liftEffect $ RM.read occurrenceA
-          mc <- maybe' (\_ -> mergeRight b) (\a -> mergeBoth a b) ma
-          traverse_ subscriber.propagate mc
+        let
+          go = unlessRaised propagated do
+            myDepth' <- liftEffect $ Ref.read depth
+            case compare myDepth myDepth' of
+              EQ -> do
+                raiseNowClearLater propagated
+                ma <- liftEffect $ RM.read occurrenceA
+                mc <- maybe' (\_ -> mergeRight b) (\a -> mergeBoth a b) ma
+                traverse_ subscriber.propagate mc
+              _ -> propagate myDepth' go
+        propagate myDepth go
     , recalculateDepth: \newDepthB -> do
         oldDepthB <- Ref.read depthB
         unless (oldDepthB == newDepthB) do

@@ -23,10 +23,11 @@ import Data.Monoid.Additive (Additive(..))
 import Data.String (toUpper)
 import Data.Tuple (fst)
 import Data.Tuple.Nested ((/\))
+import Effect.Reactive (react)
 import Test.Data.Observe (class Observable, (=-=))
 import Test.Effect.Reactive.Dual
-  ( Event
-  , Raff
+  ( Event(..)
+  , Raff(..)
   , accumB
   , accumE
   , accumMaybeE
@@ -80,6 +81,17 @@ reactiveSpec = describe "Effect.Reactive" do
     bswitch <- stepper false eswitch
     let b = bswitch <#> if _ then evalues else evalues'
     pure $ switch b
+  matchesModelM2 "join" bool int \eswitch evalues -> do
+    let evalues' = negate <$> evalues
+    bswitch <- stepper false eswitch
+    let b = bswitch <#> if _ then evalues else evalues'
+    -- TODO document this known limitation. You need to "ground" an input event
+    -- if you want to feed it into a join, otherwise its trigger won't fire
+    -- before it is subscribed to
+    _ <- R
+      (pure $ pure unit)
+      (react (case evalues of E _ r -> r) \_ -> pure unit)
+    pure $ join $ liftSample2 const b eswitch
   matchesModel "append+filter" int \e ->
     let
       e1 = map (_ + 1) $ filter even e

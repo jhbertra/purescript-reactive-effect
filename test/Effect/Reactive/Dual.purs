@@ -123,6 +123,11 @@ instance Plus (Event t) where
 instance Apply (Event t) where
   apply (E m1 e1) (E m2 e2) = E (m1 <*> m2) (e1 <*> e2)
 
+instance Bind (Event t) where
+  bind (E m r) k = E
+    (m >>= k >>> case _ of E m' _ -> m')
+    (r >>= k >>> case _ of E _ r' -> r')
+
 instance Align (Event t) where
   align f (E m1 e1) (E m2 e2) = E (align f m1 m2) (align f e1 e2)
 

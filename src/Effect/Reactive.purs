@@ -73,6 +73,7 @@ module Effect.Reactive
   , stepper
   , switch
   , switchE
+  , switchEImmediately
   , switcher
   , tag
   , tagMaybe
@@ -83,7 +84,7 @@ module Effect.Reactive
 import Prelude
 
 import Concurrent.Queue as Q
-import Control.Alt (class Alt)
+import Control.Alt (class Alt, (<|>))
 import Control.Alternative (class Plus)
 import Control.Apply (lift2)
 import Control.Lazy (class Lazy)
@@ -140,6 +141,7 @@ import Effect.Reactive.Internal.Input
   , newInput
   , newInputWithTriggerRef
   )
+import Effect.Reactive.Internal.Join (joinEvent)
 import Effect.Reactive.Internal.Latch (latchBehaviour, newLatch)
 import Effect.Reactive.Internal.Merge (_mergeWithMaybeM) as Internal
 import Effect.Reactive.Internal.Pipe (_pull)
@@ -288,6 +290,14 @@ instance Apply (Event t) where
   apply = alignMaybe case _ of
     Both f a -> Just $ f a
     _ -> Nothing
+
+instance Bind (Event t) where
+  bind (Event event) k = Event $ unsafePerformEffect do
+    cache <- RM.empty
+    pure $ joinEvent
+      { cache
+      , parent: Internal._pushRaw (pure <<< Just <<< coerce k) event
+      }
 
 instance Alt (Event t) where
   alt = align $ these identity identity const
@@ -573,6 +583,16 @@ switchE
   -> Event t (Event t a)
   -> m (Event t a)
 switchE e0 ee = switch <$> stepper e0 ee
+
+switchEImmediately
+  :: forall t m a
+   . MonadRaff t m
+  => Event t a
+  -> Event t (Event t a)
+  -> m (Event t a)
+switchEImmediately e0 ee = do
+  e <- switchE e0 ee
+  pure $ join ee <|> e
 
 fanMap :: forall t k v. Ord k => Event t (Map k v) -> EventSelector t k v
 fanMap (Event parent) = unsafePerformEffect do
