@@ -43,8 +43,8 @@ import Test.Effect.Reactive.Dual
   , time
   )
 import Test.QuickCheck (class Arbitrary)
-import Test.QuickCheck.Extra (quickCheckImpure, quickCheckImpure')
-import Test.Spec (Spec, describe, focus, it)
+import Test.QuickCheck.Extra (quickCheckImpure)
+import Test.Spec (Spec, describe, it)
 import Type.Proxy (Proxy(..))
 
 unit' = Proxy :: Proxy Unit

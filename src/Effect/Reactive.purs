@@ -54,11 +54,11 @@ module Effect.Reactive
   , mapAccumMaybe_
   , mapAccum_
   , newEvent
-  , nowEvent
   , partitionApply
   , partitionMapApply
   , patcher
   , pause
+  , getPostBuild
   , pull
   , pullContinuous
   , push
@@ -92,12 +92,13 @@ import Control.Apply (lift2)
 import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Error.Class (catchError, throwError)
-import Control.Monad.Fix (class MonadFix, mfix, mfix2)
+import Control.Monad.Fix (class MonadFix, mfix, mfix2, mfix3)
 import Control.Monad.Reader (asks)
 import Control.Monad.Rec.Class (forever)
 import Control.Monad.Unlift (class MonadUnlift)
 import Control.Plus (empty)
 import Data.Align (class Align, class Alignable, align)
+import Data.Array (null)
 import Data.Compactable (class Compactable, separate)
 import Data.Either (Either(..), either, hush)
 import Data.Exists (mkExists)
@@ -109,6 +110,7 @@ import Data.Lazy (force)
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Patch (class Patch)
+import Data.Queue.Priority as PQ
 import Data.These (These(..), these)
 import Data.Time.Duration
   ( class Duration
@@ -119,8 +121,9 @@ import Data.Time.Duration
 import Data.Traversable (Accum)
 import Data.Tuple (Tuple(..), snd)
 import Data.Tuple.Nested ((/\))
+import Data.WeakBag as WeakBag
 import Debug (class DebugWarning, traceM)
-import Effect (Effect)
+import Effect (Effect, whileE)
 import Effect.Aff (Aff, delay, killFiber, launchAff, launchAff_)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (error)
@@ -134,10 +137,12 @@ import Effect.Reactive.Internal
   , PropagateM
   , SampleHint(..)
   , _neverE
+  , _postBuild
   , _pushRaw
   , _time
   , tellHint
   ) as Internal
+import Effect.Reactive.Internal (currentDepth, propagations, updateDepth)
 import Effect.Reactive.Internal.Build
   ( fireAndRead
   , liftBuild
@@ -158,8 +163,14 @@ import Effect.Reactive.Internal.Pipe (_pull)
 import Effect.Reactive.Internal.Reaction (_react)
 import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
+import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
-import Effect.Unlift (class MonadUnliftEffect, askRunInEffect)
+import Effect.Unlift
+  ( class MonadUnliftEffect
+  , askRunInEffect
+  , askUnliftEffect
+  , unliftEffect
+  )
 import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 
@@ -210,16 +221,64 @@ launchRaff :: forall a. (forall t. Raff t a) -> Effect (RaffResult a)
 launchRaff (Raff m) = do
   controller@(RaffController { isRunning, getTime }) <-
     newRaffController
-  result /\ _ <- mfix2 \_ runInEffect -> do
+  result /\ firePostBuild /\ _ <- mfix3 \_ _ runInEffect -> do
+    queue <- Ref.new []
+    postBuildRef <- RM.empty
+    isDrainingRef <- Ref.new false
     let
-      fireTriggers = Internal.FireTriggers \triggers -> whenM isRunning do
-        runInEffect $ fireAndRead triggers $ pure unit
-    liftEffect $ runBuildM getTime fireTriggers do
+      firePostBuild _ = do
+        mPostBuild <- RM.read postBuildRef
+        for_ mPostBuild \{ subscribers } -> do
+          RM.clear postBuildRef
+          runInEffect $ runFrame do
+            WeakBag.traverseMembers_ (\s -> s.propagate unit) subscribers
+            -- drain propagations
+            propagationsQ <- propagations
+            u <- askUnliftEffect
+            liftEffect $ PQ.drain propagationsQ \depth evaluate ->
+              unliftEffect u do
+                cd <- currentDepth
+                updateDepth depth
+                unless (depth < cd) evaluate
+    let
+      fireTriggers triggers = whenM isRunning do
+        isDraining <- Ref.read isDrainingRef
+        if isDraining then
+          Ref.modify_ (_ <> triggers) queue
+        else do
+          Ref.write true isDrainingRef
+          Ref.write triggers queue
+          whileE (not <<< null <$> Ref.read queue) do
+            ts <- Ref.read queue
+            Ref.write [] queue
+            runInEffect $ fireAndRead ts $ pure unit
+            firePostBuild unit
+          Ref.write false isDrainingRef
+    let
+      getPostBuild' = RM.read postBuildRef >>= case _ of
+        Just { postBuild } -> pure postBuild
+        Nothing -> do
+          subscribers <- WeakBag.new $ RM.clear postBuildRef
+          let
+            postBuild subscriber = liftEffect do
+              ticket <- WeakBag.insert subscriber subscribers
+              depth <- Ref.new 0
+              pure
+                { subscription:
+                    { unsubscribe: WeakBag.destroyTicket ticket
+                    , depth
+                    }
+                , occurrence: Nothing
+                }
+          RM.write { postBuild, subscribers } postBuildRef
+          pure postBuild
+    runBuildM getPostBuild' getTime (Internal.FireTriggers fireTriggers) do
       runInEffect' <- askRunInEffect
       result <- m
       runFrame do
         liftEffect $ resume controller
-        pure $ pure result /\ runInEffect'
+        pure $ pure result /\ firePostBuild /\ runInEffect'
+  firePostBuild unit
   pure { controller, result: force result }
 
 foreign import newRaffController :: Effect RaffController
@@ -372,6 +431,9 @@ instance Semigroup a => Monoid (Event t a) where
 
 derive newtype instance Lazy (Event t a)
 
+getPostBuild :: forall t. Raff t (Event t Unit)
+getPostBuild = coerce Internal._postBuild
+
 makeEvent
   :: forall t m a
    . MonadRaff t m
@@ -382,9 +444,6 @@ makeEvent subscribe = liftRaff $ Raff do
   input <- liftEffect $ newInput \trigger -> subscribe \value ->
     fireTriggers [ mkExists $ Internal.InvokeTrigger { trigger, value } ]
   pure $ Event $ inputEvent input
-
-nowEvent :: forall t m. MonadRaff t m => m (Event t Unit)
-nowEvent = makeEvent \fire -> fire unit *> pure (pure unit)
 
 delayEvent :: forall d t m. Duration d => MonadRaff t m => d -> m (Event t Unit)
 delayEvent d = makeEventAff \fire -> do

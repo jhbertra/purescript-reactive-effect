@@ -333,6 +333,7 @@ type BuildEnv' r =
   , newLatches :: ExistentialQueue Latch
   , newReactors :: ExistentialQueue Reactor
   , getTime :: Effect Milliseconds
+  , getPostBuild :: Effect (EventRep Unit)
   | r
   }
 
@@ -472,6 +473,9 @@ _neverE = const $ pure $
   { occurrence: Nothing
   , subscription: { depth: zeroDepth, unsubscribe: mempty }
   }
+
+_postBuild :: BuildM (EventRep Unit)
+_postBuild = BM $ RE \env -> env.getPostBuild
 
 -------------------------------------------------------------------------------
 -- Helpers

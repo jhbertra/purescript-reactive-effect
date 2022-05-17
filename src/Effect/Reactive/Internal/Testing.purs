@@ -6,9 +6,11 @@ import Data.Align (aligned)
 import Data.Array as Array
 import Data.Compactable (compact)
 import Data.Exists (mkExists)
+import Data.Foldable (traverse_)
 import Data.FoldableWithIndex (forWithIndex_)
 import Data.Int (toNumber)
-import Data.Maybe (Maybe)
+import Data.Maybe (Maybe(..))
+import Data.OrderedBag as OB
 import Data.These (theseLeft, theseRight)
 import Data.Time.Duration (Milliseconds(..))
 import Effect (Effect)
@@ -40,14 +42,29 @@ interpret2
   -> Effect (Array (Maybe c))
 interpret2 f as bs = do
   currentTime <- Ref.new $ Milliseconds 0.0
-  runBuildM (Ref.read currentTime) (FireTriggers mempty) do
+  postBuildSubscribers <- OB.new
+  let
+    postBuild subscriber = liftEffect do
+      _ <- OB.insert subscriber postBuildSubscribers
+      depth <- Ref.new 0
+      pure
+        { subscription:
+            { unsubscribe: OB.delete subscriber postBuildSubscribers
+            , depth
+            }
+        , occurrence: Nothing
+        }
+  runBuildM (pure postBuild) (Ref.read currentTime) (FireTriggers mempty) do
     result <- liftEffect $ Ref.new []
     input1 <- liftEffect newInputWithTriggerRef
     input2 <- liftEffect newInputWithTriggerRef
     let ea = inputEvent input1.input
     let eb = inputEvent input2.input
     ec <- f ea eb
-    handle <- runFrame $ getEventHandle ec
+    handle <- runFrame do
+      liftEffect (OB.toArray postBuildSubscribers) >>= traverse_ \subscriber ->
+        subscriber.propagate unit
+      getEventHandle ec
     forWithIndex_ (aligned as bs) \time mab -> do
       liftEffect $ Ref.write (Milliseconds $ toNumber time) currentTime
       mTrigger1 <- liftEffect $ RM.read input1.trigger

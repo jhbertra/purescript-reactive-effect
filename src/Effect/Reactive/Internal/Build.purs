@@ -21,6 +21,7 @@ import Effect.Reactive.Internal
   , BehaviourSubscription(..)
   , BuildM(..)
   , Clear(..)
+  , EventRep
   , FireTriggers
   , InvokeTrigger(..)
   , JoinReset(..)
@@ -61,18 +62,37 @@ instance MonadBuild BuildM where
 
 instance MonadBuild PropagateM where
   liftBuild (BM m) =
-    PM $ RE \{ fireTriggers, newLatches, newReactors, reactors, getTime } ->
-      runReaderEffect
-        m
-        { fireTriggers, newLatches, newReactors, reactors, getTime }
+    PM $ RE
+      \{ fireTriggers
+       , newLatches
+       , newReactors
+       , reactors
+       , getTime
+       , getPostBuild
+       } ->
+        runReaderEffect
+          m
+          { fireTriggers
+          , newLatches
+          , newReactors
+          , reactors
+          , getTime
+          , getPostBuild
+          }
 
 runBuildM
-  :: forall a. Effect Milliseconds -> FireTriggers -> BuildM a -> Effect a
-runBuildM getTime fireTriggers (BM m) = do
+  :: forall a
+   . Effect (EventRep Unit)
+  -> Effect Milliseconds
+  -> FireTriggers
+  -> BuildM a
+  -> Effect a
+runBuildM getPostBuild getTime fireTriggers (BM m) = do
   newLatches <- EQ.new
   newReactors <- EQ.new
   reactors <- OB.new
-  runReaderEffect m { fireTriggers, newLatches, newReactors, reactors, getTime }
+  runReaderEffect m
+    { fireTriggers, newLatches, newReactors, reactors, getTime, getPostBuild }
 
 fireAndRead :: forall a. Array (Exists InvokeTrigger) -> Effect a -> BuildM a
 fireAndRead triggers read = runFrame do
@@ -109,13 +129,14 @@ runFrame frame = BM $ RE \buildEnv -> do
       , reactors: buildEnv.reactors
       , newLatches: buildEnv.newLatches
       , newReactors: buildEnv.newReactors
+      , getPostBuild: buildEnv.getPostBuild
+      , getTime: buildEnv.getTime
       , clears
       , reactions
       , latchUpdates
       , joinResets
       , currentDepth: currentDepthRef
       , propagations: propagationsQ
-      , getTime: buildEnv.getTime
       }
   -- Propagate events throughout network
   result <- runPropagateM propagateEnv do

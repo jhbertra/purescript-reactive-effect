@@ -16,11 +16,11 @@ import Effect.Reactive
   , Raff
   , accumE
   , bracketReact
+  , getPostBuild
   , indexed_
   , intervalEvent
   , launchRaff_
   , liftSample2
-  , nowEvent
   , stepper
   , (<&)
   )
@@ -35,7 +35,7 @@ import Web.HTML.Window (document)
 
 main :: Effect Unit
 main = launchRaff_ do
-  e <- indexed_ =<< (lift2 (<|>) nowEvent $ intervalEvent $ Seconds 1.0)
+  e <- indexed_ =<< (lift2 (<|>) getPostBuild $ intervalEvent $ Seconds 1.0)
   let e1 = filter (eq 0 <<< (_ `mod` 3)) e
   let e2 = filter odd e
   let e3 = aligned e1 e2

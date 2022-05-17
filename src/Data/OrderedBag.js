@@ -19,4 +19,8 @@ const _delete = (member) => (bag) => () => {
   bag.members.delete(member);
 };
 
-export { _new, insert, _get, _delete };
+const toArray = (bag) => () => {
+  return Array.from(bag.keys());
+};
+
+export { _new, insert, _get, _delete, toArray };

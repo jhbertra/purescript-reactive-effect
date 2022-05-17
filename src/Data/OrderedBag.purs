@@ -1,4 +1,4 @@
-module Data.OrderedBag (OrderedBag, new, insert, delete, inOrder) where
+module Data.OrderedBag (OrderedBag, new, insert, delete, inOrder, toArray) where
 
 import Prelude
 
@@ -36,3 +36,5 @@ inOrder bag f as = do
     )
     as
   pure $ snd <$> sortBy (comparing fst) tagged
+
+foreign import toArray :: forall a. OrderedBag a -> Effect (Array a)
