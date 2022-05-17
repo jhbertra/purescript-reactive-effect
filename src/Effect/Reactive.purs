@@ -3,6 +3,7 @@ module Effect.Reactive
   , class MonadRaff
   , Behaviour
   , Event
+  , EventSelector
   , Raff
   , RaffPull
   , RaffPush
@@ -23,6 +24,7 @@ module Effect.Reactive
   , alignMaybeM
   , bracketReact
   , delayEvent
+  , fanMap
   , filterApply
   , gate
   , indexed
@@ -66,6 +68,7 @@ module Effect.Reactive
   , sample
   , sampleApply
   , sampleApplyMaybe
+  , selectEvent
   , split
   , stepper
   , switch
@@ -99,6 +102,7 @@ import Data.Filterable (class Filterable, eitherBool, filterMap, maybeBool)
 import Data.Foldable (for_, traverse_)
 import Data.HeytingAlgebra (ff, implies, tt)
 import Data.Identity (Identity(..))
+import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Patch (class Patch)
 import Data.These (These(..), these)
@@ -130,6 +134,7 @@ import Effect.Reactive.Internal.Build
   , runFrame
   )
 import Effect.Reactive.Internal.Cached (_cached) as Internal
+import Effect.Reactive.Internal.Fan (mapFanEvent)
 import Effect.Reactive.Internal.Input
   ( inputEvent
   , newInput
@@ -270,6 +275,11 @@ newtype Event (t :: Timeline) a = Event (Internal.EventRep a)
 type role Event nominal representational
 
 type EventIO (t :: Timeline) a = { event :: Event t a, fire :: a -> Aff Unit }
+
+newtype EventSelector t k v = EventSelector (k -> Event t v)
+
+selectEvent :: forall t k v. EventSelector t k v -> k -> Event t v
+selectEvent (EventSelector f) = f
 
 instance Functor (Event t) where
   map f = push $ pure <<< Just <<< f
@@ -563,6 +573,12 @@ switchE
   -> Event t (Event t a)
   -> m (Event t a)
 switchE e0 ee = switch <$> stepper e0 ee
+
+fanMap :: forall t k v. Ord k => Event t (Map k v) -> EventSelector t k v
+fanMap (Event parent) = unsafePerformEffect do
+  cache <- RM.empty
+  let fan = { parent, cache }
+  pure $ EventSelector \k -> Event $ mapFanEvent k fan
 
 -------------------------------------------------------------------------------
 -- Behaviours

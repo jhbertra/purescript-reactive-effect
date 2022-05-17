@@ -27,6 +27,7 @@
   , "monad-control"
   , "newtype"
   , "nonempty"
+  , "ordered-collections"
   , "orders"
   , "parallel"
   , "partial"

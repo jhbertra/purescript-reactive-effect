@@ -15,6 +15,7 @@ import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (for_, traverse_)
 import Data.Lazy (force)
 import Data.Lazy as DL
+import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (class Newtype)
 import Data.OrderedBag (OrderedBag)
@@ -255,6 +256,17 @@ newtype SwitchCache a = SwitchCache
   , subscription :: Ref PullSubscription
   , currentParent :: Ref EventSubscription
   , parent :: BehaviourRep (EventRep a)
+  }
+
+type MapFan k v =
+  { parent :: EventRep (Map k v)
+  , cache :: MaybeRef (MapFanCache k v)
+  }
+
+newtype MapFanCache k v = MapFanCache
+  { occurrence :: MaybeRef (Map k v)
+  , subscribers :: Ref (Map k (WeakBag (EventSubscriber v)))
+  , subscription :: EventSubscription
   }
 
 wrapSubscribeCached
