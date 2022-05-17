@@ -20,6 +20,7 @@ import Data.Function (on)
 import Data.Int (even, odd)
 import Data.Maybe (Maybe)
 import Data.Monoid.Additive (Additive(..))
+import Data.Newtype (unwrap)
 import Data.String (toUpper)
 import Data.Tuple (fst)
 import Data.Tuple.Nested ((/\))
@@ -39,10 +40,11 @@ import Test.Effect.Reactive.Dual
   , liftSample2
   , stepper
   , switch
+  , time
   )
 import Test.QuickCheck (class Arbitrary)
-import Test.QuickCheck.Extra (quickCheckImpure)
-import Test.Spec (Spec, describe, it)
+import Test.QuickCheck.Extra (quickCheckImpure, quickCheckImpure')
+import Test.Spec (Spec, describe, focus, it)
 import Type.Proxy (Proxy(..))
 
 unit' = Proxy :: Proxy Unit
@@ -125,6 +127,9 @@ reactiveSpec = describe "Effect.Reactive" do
       let resultB = (_ /\ 0) <$> focusB
       pure $ liftSample2 const resultB inputE /\ resultB
     pure $ liftSample2 const resultB inputE
+  matchesModelM "time" unit' \e -> do
+    t <- time
+    pure $ liftSample2 const (unwrap <$> t) e
 
 matchesModel
   :: forall t o a b

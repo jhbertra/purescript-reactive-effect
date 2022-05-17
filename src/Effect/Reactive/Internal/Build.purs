@@ -10,13 +10,16 @@ import Data.OrderedBag (inOrder)
 import Data.OrderedBag as OB
 import Data.Queue.Existential as EQ
 import Data.Queue.Priority as PQ
+import Data.Time.Duration (Milliseconds)
 import Data.Tuple (Tuple(..))
 import Data.WeakBag as WeakBag
 import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
-  ( BuildM(..)
+  ( BehaviourSubscriber(..)
+  , BehaviourSubscription(..)
+  , BuildM(..)
   , Clear(..)
   , FireTriggers
   , InvokeTrigger(..)
@@ -25,8 +28,6 @@ import Effect.Reactive.Internal
   , LatchUpdate(..)
   , PropagateEnv
   , PropagateM(..)
-  , PullSubscriber(..)
-  , PullSubscription(..)
   , Reaction(..)
   , Reactor(..)
   , SwitchCache(..)
@@ -60,15 +61,18 @@ instance MonadBuild BuildM where
 
 instance MonadBuild PropagateM where
   liftBuild (BM m) =
-    PM $ RE \{ fireTriggers, newLatches, newReactors, reactors } ->
-      runReaderEffect m { fireTriggers, newLatches, newReactors, reactors }
+    PM $ RE \{ fireTriggers, newLatches, newReactors, reactors, getTime } ->
+      runReaderEffect
+        m
+        { fireTriggers, newLatches, newReactors, reactors, getTime }
 
-runBuildM :: forall a. FireTriggers -> BuildM a -> Effect a
-runBuildM fireTriggers (BM m) = do
+runBuildM
+  :: forall a. Effect Milliseconds -> FireTriggers -> BuildM a -> Effect a
+runBuildM getTime fireTriggers (BM m) = do
   newLatches <- EQ.new
   newReactors <- EQ.new
   reactors <- OB.new
-  runReaderEffect m { fireTriggers, newLatches, newReactors, reactors }
+  runReaderEffect m { fireTriggers, newLatches, newReactors, reactors, getTime }
 
 fireAndRead :: forall a. Array (Exists InvokeTrigger) -> Effect a -> BuildM a
 fireAndRead triggers read = runFrame do
@@ -111,6 +115,7 @@ runFrame frame = BM $ RE \buildEnv -> do
       , joinResets
       , currentDepth: currentDepthRef
       , propagations: propagationsQ
+      , getTime: buildEnv.getTime
       }
   -- Propagate events throughout network
   result <- runPropagateM propagateEnv do

@@ -13,12 +13,10 @@ import Effect.Reactive.Internal
   , EventRep
   , Latch(..)
   , LatchUpdate(..)
-  , PullHint(..)
-  , PullSource(..)
+  , SampleHint(..)
   , _subscribe
-  , invalidatePullSubscriber
+  , invalidateBehaviourSubscriber
   , tellHint
-  , tellSource
   , terminalSubscriber
   , trackSubscriber
   , updateLatch
@@ -61,15 +59,14 @@ newLatch initialValue updateOn = do
       { valueRef
       , newValue
       , invalidateOld: \switchesInvalidated -> WeakBag.traverseMembers_
-          (runExists (invalidatePullSubscriber switchesInvalidated))
+          (runExists (invalidateBehaviourSubscriber switchesInvalidated))
           subscribers
       }
 
 latchBehaviour :: forall a. Latch a -> BehaviourRep a
 latchBehaviour (Latch latch) = do
   value <- liftEffect $ Ref.read latch.value
-  tellHint PullOnce
-  tellSource $ LatchSource $ Latch latch
+  tellHint SampleOnce
   trackSubscriber latch.subscribers
   pure value
 

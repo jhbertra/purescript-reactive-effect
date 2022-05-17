@@ -5,6 +5,7 @@ module Effect.Reactive
   , Event
   , EventSelector
   , Raff
+  , RaffController
   , RaffPull
   , RaffPush
   , Timeline
@@ -57,6 +58,7 @@ module Effect.Reactive
   , partitionApply
   , partitionMapApply
   , patcher
+  , pause
   , pull
   , pullContinuous
   , push
@@ -64,7 +66,7 @@ module Effect.Reactive
   , pushFlipped
   , pushed
   , react
-  , runRaff
+  , resume
   , sample
   , sampleApply
   , sampleApplyMaybe
@@ -77,13 +79,13 @@ module Effect.Reactive
   , switcher
   , tag
   , tagMaybe
+  , time
   , traceEvent
   , traceEventWith
   ) where
 
 import Prelude
 
-import Concurrent.Queue as Q
 import Control.Alt (class Alt, (<|>))
 import Control.Alternative (class Plus)
 import Control.Apply (lift2)
@@ -103,16 +105,23 @@ import Data.Filterable (class Filterable, eitherBool, filterMap, maybeBool)
 import Data.Foldable (for_, traverse_)
 import Data.HeytingAlgebra (ff, implies, tt)
 import Data.Identity (Identity(..))
+import Data.Lazy (force)
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Patch (class Patch)
 import Data.These (These(..), these)
-import Data.Time.Duration (class Duration, fromDuration)
+import Data.Time.Duration
+  ( class Duration
+  , Milliseconds
+  , fromDuration
+  , toDuration
+  )
 import Data.Traversable (Accum)
 import Data.Tuple (Tuple(..), snd)
+import Data.Tuple.Nested ((/\))
 import Debug (class DebugWarning, traceM)
 import Effect (Effect)
-import Effect.Aff (Aff, Fiber, delay, killFiber, launchAff, launchAff_)
+import Effect.Aff (Aff, delay, killFiber, launchAff, launchAff_)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (error)
 import Effect.RW (RWEffect(..), runRWEffect)
@@ -123,9 +132,10 @@ import Effect.Reactive.Internal
   , FireTriggers(..)
   , InvokeTrigger(..)
   , PropagateM
-  , PullHint(..)
+  , SampleHint(..)
   , _neverE
   , _pushRaw
+  , _time
   , tellHint
   ) as Internal
 import Effect.Reactive.Internal.Build
@@ -149,7 +159,7 @@ import Effect.Reactive.Internal.Reaction (_react)
 import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
 import Effect.Ref.Maybe as RM
-import Effect.Unlift (class MonadUnliftEffect, askUnliftEffect, unliftEffect)
+import Effect.Unlift (class MonadUnliftEffect, askRunInEffect)
 import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 
@@ -160,6 +170,11 @@ import Safe.Coerce (coerce)
 foreign import data Timeline :: Type
 
 newtype Raff (t :: Timeline) a = Raff (Internal.BuildM a)
+
+type RaffResult a =
+  { result :: a
+  , controller :: RaffController
+  }
 
 derive newtype instance Functor (Raff t)
 derive newtype instance Apply (Raff t)
@@ -189,22 +204,42 @@ instance MonadRaff t (RaffPush t) where
   liftRaff (Raff m) = RaffPush $ liftBuild m
 
 launchRaff_ :: (forall t. Raff t Unit) -> Effect Unit
-launchRaff_ m = launchAff_ (runRaff m)
+launchRaff_ m = void $ launchRaff m
 
-launchRaff :: (forall t. Raff t Unit) -> Effect (Fiber Unit)
-launchRaff m = launchAff (runRaff m)
+launchRaff :: forall a. (forall t. Raff t a) -> Effect (RaffResult a)
+launchRaff (Raff m) = do
+  controller@(RaffController { isRunning, getTime }) <-
+    newRaffController
+  result /\ _ <- mfix2 \_ runInEffect -> do
+    let
+      fireTriggers = Internal.FireTriggers \triggers -> whenM isRunning do
+        runInEffect $ fireAndRead triggers $ pure unit
+    liftEffect $ runBuildM getTime fireTriggers do
+      runInEffect' <- askRunInEffect
+      result <- m
+      runFrame do
+        liftEffect $ resume controller
+        pure $ pure result /\ runInEffect'
+  pure { controller, result: force result }
 
-runRaff :: (forall t. Raff t Unit) -> Aff Unit
-runRaff (Raff m) = do
-  triggerQueue <- Q.new
-  let fireTriggers = Internal.FireTriggers $ Q.write triggerQueue
-  u <- liftEffect $ runBuildM fireTriggers do
-    u <- askUnliftEffect
-    m
-    runFrame $ pure u
-  forever do
-    triggers <- Q.read triggerQueue
-    liftEffect $ unliftEffect u $ fireAndRead triggers $ pure unit
+foreign import newRaffController :: Effect RaffController
+
+-------------------------------------------------------------------------------
+-- Raff Controller
+-------------------------------------------------------------------------------
+
+newtype RaffController = RaffController
+  { isRunning :: Effect Boolean
+  , getTime :: Effect Milliseconds
+  , pause :: Effect Unit
+  , resume :: Effect Unit
+  }
+
+pause :: RaffController -> Effect Unit
+pause (RaffController controller) = controller.pause
+
+resume :: RaffController -> Effect Unit
+resume (RaffController controller) = controller.resume
 
 -------------------------------------------------------------------------------
 -- RaffPush monad
@@ -276,7 +311,8 @@ newtype Event (t :: Timeline) a = Event (Internal.EventRep a)
 
 type role Event nominal representational
 
-type EventIO (t :: Timeline) a = { event :: Event t a, fire :: a -> Aff Unit }
+type EventIO (t :: Timeline) a =
+  { event :: Event t a, fire :: a -> Effect Unit }
 
 newtype EventSelector t k v = EventSelector (k -> Event t v)
 
@@ -343,7 +379,7 @@ makeEvent
   -> m (Event t a)
 makeEvent subscribe = liftRaff $ Raff do
   Internal.FireTriggers fireTriggers <- asks _.fireTriggers
-  input <- liftEffect $ newInput \trigger -> subscribe \value -> launchAff_ $
+  input <- liftEffect $ newInput \trigger -> subscribe \value ->
     fireTriggers [ mkExists $ Internal.InvokeTrigger { trigger, value } ]
   pure $ Event $ inputEvent input
 
@@ -663,7 +699,12 @@ pull = coerce (_pull :: Internal.BehaviourRep a -> Internal.BehaviourRep a)
 
 pullContinuous :: forall t a. RaffPull t a -> Behaviour t a
 pullContinuous (RaffPull m) =
-  pull $ RaffPull $ Internal.tellHint Internal.PullContinuous *> m
+  pull $ RaffPull $ Internal.tellHint Internal.SampleContinuous *> m
+
+time :: forall t m d. MonadRaff t m => Duration d => m (Behaviour t d)
+time = do
+  b <- liftRaff $ Raff Internal._time
+  pure $ toDuration <$> Behaviour b
 
 patcher
   :: forall patch t m a

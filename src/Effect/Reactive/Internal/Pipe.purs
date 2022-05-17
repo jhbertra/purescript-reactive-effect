@@ -10,22 +10,25 @@ import Effect.Class (liftEffect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
   ( BehaviourRep
+  , BehaviourSubscriber(..)
+  , BehaviourSubscription(..)
   , Pipe
-  , PullSubscriber(..)
-  , PullSubscription(..)
+  , SampleHint(..)
+  , readBehaviourUntracked
+  , tellHint
   , trackSubscriber
   )
-import Effect.Ref as Ref
+import Effect.Ref.Maybe as RM
 import Effect.Unsafe (unsafePerformEffect)
 
 _pull :: BehaviourRep ~> BehaviourRep
 _pull evaluate = unsafePerformEffect do
-  cache <- Ref.new Nothing
+  cache <- RM.empty
   pure $ pipeBehaviour { evaluate, cache }
 
 pipeBehaviour :: Pipe ~> BehaviourRep
 pipeBehaviour pipe = do
-  mCache <- liftEffect $ Ref.read pipe.cache
+  mCache <- liftEffect $ RM.read pipe.cache
   cache <- case mCache of
     Just cache -> pure cache
     Nothing -> do
@@ -37,8 +40,16 @@ pipeBehaviour pipe = do
       subscribers <- liftEffect $ WeakBag.new case subscription of
         Inactive -> pure unit
         Active { unsubscribe } -> unsubscribe
-      let cache = { subscription, subscribers, value }
-      liftEffect $ Ref.write (Just cache) pipe.cache
+      case subscription of
+        Active { hint } -> tellHint hint
+        _ -> pure unit
+      let
+        getValue = case subscription of
+          Active { hint: SampleContinuous } ->
+            readBehaviourUntracked pipe.evaluate
+          _ -> pure value
+      let cache = { subscription, subscribers, getValue }
+      liftEffect $ RM.write cache pipe.cache
       pure cache
   trackSubscriber cache.subscribers
-  pure $ cache.value
+  liftEffect $ cache.getValue

@@ -14,12 +14,12 @@ import Data.WeakBag as WeakBag
 import Effect.Class (liftEffect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
-  ( CacheResult
+  ( BehaviourSubscriber(..)
+  , CacheResult
   , Clear(..)
   , EventRep
   , EventSubscriber
   , PropagateM
-  , PullSubscriber(..)
   , Switch
   , SwitchCache(..)
   , _subscribe

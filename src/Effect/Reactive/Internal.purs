@@ -9,9 +9,7 @@ import Control.Monad.Reader (class MonadAsk, class MonadReader)
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Unlift (class MonadUnlift)
 import Control.Monad.Writer (tell)
-import Data.CatList (CatList(..))
-import Data.CatList as Cat
-import Data.Exists (Exists, mkExists, runExists)
+import Data.Exists (Exists, runExists)
 import Data.Foldable (for_, traverse_)
 import Data.Lazy (force)
 import Data.Lazy as DL
@@ -23,11 +21,11 @@ import Data.Queue.Existential (ExistentialQueue)
 import Data.Queue.Existential as EQ
 import Data.Queue.Priority (PriorityQueue)
 import Data.Queue.Priority as PQ
+import Data.Time.Duration (Milliseconds)
 import Data.Traversable (traverse)
 import Data.WeakBag (WeakBag, WeakBagTicket)
 import Data.WeakBag as WeakBag
 import Effect (Effect)
-import Effect.Aff (Aff)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.RW (RWEffect(..))
 import Effect.Reader (ReaderEffect(..))
@@ -78,70 +76,55 @@ invalidDepth = -2
 -- Behaviours
 -------------------------------------------------------------------------------
 
-type BehaviourRep a = RWEffect PullEnv PullSubscription a
+type BehaviourRep a = RWEffect BehaviourEnv BehaviourSubscription a
 
-type PullEnv = Maybe SomePullSubscriber
+type BehaviourEnv = Maybe SomeBehaviourSubscriber
 
-data PullSource a
-  = LatchSource (Latch a)
-  | PipeSource (PipeCache a)
-
-data PullSubscriber a
+data BehaviourSubscriber a
   = PipeSubscriber (Pipe a)
   | SwitchSubscriber (DL.Lazy (SwitchCache a))
   | AnimationSubscriber Int (DL.Lazy AnimationInitialized)
 
-data PullHint
-  = PullOnce
-  | PullContinuous
+data SampleHint
+  = SampleOnce
+  | SampleContinuous
 
-instance Semigroup PullHint where
-  append PullContinuous _ = PullContinuous
+instance Semigroup SampleHint where
+  append SampleContinuous _ = SampleContinuous
   append _ b = b
 
-instance Monoid PullHint where
-  mempty = PullOnce
+instance Monoid SampleHint where
+  mempty = SampleOnce
 
-type SomePullSubscriber = Exists PullSubscriber
-data PullSubscription
+type SomeBehaviourSubscriber = Exists BehaviourSubscriber
+data BehaviourSubscription
   = Inactive
   | Active
-      { sources :: CatList (Exists PullSource)
-      , hint :: PullHint
+      { hint :: SampleHint
       , unsubscribe :: Effect Unit
       }
 
-instance Semigroup PullSubscription where
+instance Semigroup BehaviourSubscription where
   append Inactive b = b
   append a Inactive = a
   append (Active a) (Active b) = Active
-    { sources: a.sources <> b.sources
-    , hint: a.hint <> b.hint
+    { hint: a.hint <> b.hint
     , unsubscribe: a.unsubscribe *> b.unsubscribe
     }
 
-instance Monoid PullSubscription where
+instance Monoid BehaviourSubscription where
   mempty = Inactive
 
-tellHint :: PullHint -> BehaviourRep Unit
-tellHint hint = tell $ Active { hint, sources: CatNil, unsubscribe: pure unit }
+tellHint :: SampleHint -> BehaviourRep Unit
+tellHint hint = tell $ Active { hint, unsubscribe: pure unit }
 
-tellSource :: forall a. PullSource a -> BehaviourRep Unit
-tellSource source = tell $
-  Active
-    { hint: PullOnce
-    , sources: Cat.singleton $ mkExists source
-    , unsubscribe: pure unit
-    }
-
-trackSubscriber :: WeakBag (Exists PullSubscriber) -> BehaviourRep Unit
+trackSubscriber :: WeakBag SomeBehaviourSubscriber -> BehaviourRep Unit
 trackSubscriber weakBag = RWE \mSubscriber subscription ->
   for_ mSubscriber \subscriber -> do
     ticket <- WeakBag.insert subscriber weakBag
     Ref.modify_
       ( _ <> Active
-          { hint: PullOnce
-          , sources: CatNil
+          { hint: SampleOnce
           , unsubscribe: WeakBag.destroyTicket ticket
           }
       )
@@ -149,7 +132,7 @@ trackSubscriber weakBag = RWE \mSubscriber subscription ->
 
 newtype Latch a = Latch
   { value :: Ref a
-  , subscribers :: WeakBag (Exists PullSubscriber)
+  , subscribers :: WeakBag SomeBehaviourSubscriber
   , initialize :: PropagateM Unit
   }
 
@@ -160,19 +143,22 @@ newtype LatchUpdate a = LatchUpdate
   }
 
 type Pipe a =
-  { cache :: Ref (Maybe (PipeCache a))
+  { cache :: MaybeRef (PipeCache a)
   , evaluate :: BehaviourRep a
   }
 
 type PipeCache a =
-  { value :: a
-  , subscribers :: WeakBag (Exists PullSubscriber)
-  , subscription :: PullSubscription
+  { getValue :: Effect a
+  , subscribers :: WeakBag SomeBehaviourSubscriber
+  , subscription :: BehaviourSubscription
   }
 
-invalidatePullSubscriber
-  :: forall a. ExistentialQueue SwitchCache -> PullSubscriber a -> Effect Unit
-invalidatePullSubscriber switchesInvalidated = case _ of
+invalidateBehaviourSubscriber
+  :: forall a
+   . ExistentialQueue SwitchCache
+  -> BehaviourSubscriber a
+  -> Effect Unit
+invalidateBehaviourSubscriber switchesInvalidated = case _ of
   PipeSubscriber pipe -> invalidatePipe switchesInvalidated pipe
   SwitchSubscriber switch -> EQ.enqueue (force switch) switchesInvalidated
   AnimationSubscriber _ animation -> (force animation).invalidate
@@ -180,12 +166,12 @@ invalidatePullSubscriber switchesInvalidated = case _ of
 invalidatePipe
   :: forall a. ExistentialQueue SwitchCache -> Pipe a -> Effect Unit
 invalidatePipe switchesInvalidated pipe = do
-  mCache <- Ref.read pipe.cache
+  mCache <- RM.read pipe.cache
   case mCache of
     Just { subscribers } -> do
-      Ref.write Nothing pipe.cache
+      RM.clear pipe.cache
       WeakBag.traverseMembers_
-        (runExists (invalidatePullSubscriber switchesInvalidated))
+        (runExists (invalidateBehaviourSubscriber switchesInvalidated))
         subscribers
     _ -> pure unit
 
@@ -193,6 +179,11 @@ readBehaviourUntracked :: BehaviourRep ~> Effect
 readBehaviourUntracked (RWE b) = do
   w <- Ref.new mempty
   b Nothing w
+
+_time :: BuildM (BehaviourRep Milliseconds)
+_time = BM $ RE \env -> pure do
+  tellHint SampleContinuous
+  liftEffect $ env.getTime
 
 -------------------------------------------------------------------------------
 -- Inputs
@@ -213,7 +204,7 @@ newtype InputCache a = InputCache
   }
 
 newtype FireTriggers = FireTriggers
-  (Array (Exists InvokeTrigger) -> Aff Unit)
+  (Array (Exists InvokeTrigger) -> Effect Unit)
 
 newtype InvokeTrigger a = InvokeTrigger
   { value :: a
@@ -253,7 +244,7 @@ newtype SwitchCache a = SwitchCache
   { occurrence :: MaybeRef a
   , depth :: Ref Int
   , subscribers :: WeakBag (EventSubscriber a)
-  , subscription :: Ref PullSubscription
+  , subscription :: Ref BehaviourSubscription
   , currentParent :: Ref EventSubscription
   , parent :: BehaviourRep (EventRep a)
   }
@@ -341,6 +332,7 @@ type BuildEnv' r =
   , reactors :: OrderedBag (Exists Reactor)
   , newLatches :: ExistentialQueue Latch
   , newReactors :: ExistentialQueue Reactor
+  , getTime :: Effect Milliseconds
   | r
   }
 

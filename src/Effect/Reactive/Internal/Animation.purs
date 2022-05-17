@@ -12,13 +12,13 @@ import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
   ( AnimationInitialized
   , BehaviourRep
-  , PullSubscriber(..)
-  , PullSubscription
+  , BehaviourSubscriber(..)
+  , BehaviourSubscription
   )
 
 type InitializeAnimation a =
-  Effect (Tuple PullSubscription a)
-  -> PullSubscription
+  Effect (Tuple BehaviourSubscription a)
+  -> BehaviourSubscription
   -> a
   -> Effect AnimationInitialized
 
