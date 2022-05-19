@@ -2,6 +2,8 @@ module Effect.Reactive.Internal.Build where
 
 import Prelude
 
+import Concurrent.Queue (Queue)
+import Concurrent.Queue as Queue
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (for_, traverse_)
 import Data.Lazy (force)
@@ -22,7 +24,7 @@ import Effect.Reactive.Internal
   , BuildM(..)
   , Clear(..)
   , EventRep
-  , FireTriggers
+  , FireTriggers(..)
   , InvokeTrigger(..)
   , JoinReset(..)
   , Latch(..)
@@ -82,17 +84,22 @@ instance MonadBuild PropagateM where
 
 runBuildM
   :: forall a
-   . Effect (EventRep Unit)
+   . Queue
+       ({ triggers :: Array (Exists InvokeTrigger), onComplete :: Effect Unit })
+  -> Effect (EventRep Unit)
   -> Effect Milliseconds
-  -> FireTriggers
   -> BuildM a
-  -> Effect a
-runBuildM getPostBuild getTime fireTriggers (BM m) = do
+  -> Effect { fire :: FireTriggers, result :: a }
+runBuildM fireQueue getPostBuild getTime (BM m) = do
   newLatches <- EQ.new
   newReactors <- EQ.new
   reactors <- OB.new
-  runReaderEffect m
+  let
+    fireTriggers = FireTriggers \triggers onComplete ->
+      Queue.write fireQueue { triggers, onComplete }
+  result <- runReaderEffect m
     { fireTriggers, newLatches, newReactors, reactors, getTime, getPostBuild }
+  pure { fire: fireTriggers, result }
 
 fireAndRead :: forall a. Array (Exists InvokeTrigger) -> Effect a -> BuildM a
 fireAndRead triggers read = runFrame do

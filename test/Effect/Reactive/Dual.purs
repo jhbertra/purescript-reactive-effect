@@ -20,7 +20,7 @@ import Data.Filterable
 import Data.Int (toNumber)
 import Data.Maybe (Maybe)
 import Data.Time.Duration (Milliseconds(..))
-import Effect (Effect)
+import Effect.Aff (Aff)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Effect.Reactive as R
 import Test.Effect.Reactive.Model as M
@@ -189,7 +189,7 @@ interpretEffect
   :: forall a b
    . (forall t. Event t a -> Raff t (Event t b))
   -> Array (Maybe a)
-  -> Effect (Array (Maybe b))
+  -> Aff (Array (Maybe b))
 interpretEffect f = interpretEffect2 (\_ ea -> f ea) []
 
 interpretEffect2
@@ -197,7 +197,7 @@ interpretEffect2
    . (forall t. Event t a -> Event t b -> Raff t (Event t c))
   -> Array (Maybe a)
   -> Array (Maybe b)
-  -> Effect (Array (Maybe c))
+  -> Aff (Array (Maybe c))
 interpretEffect2 f = R.interpret2
   ( \e1 e2 -> map (\(E _ e) -> e)
       $ (\(R _ m) -> m)

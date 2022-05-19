@@ -3,16 +3,20 @@ module Main where
 import Prelude
 
 import Control.Alt ((<|>))
+import Control.Alternative (empty)
 import Control.Apply (lift2)
 import Data.Align (aligned)
 import Data.Filterable (filter)
 import Data.Int (odd)
 import Data.Maybe (Maybe(..))
-import Data.Time.Duration (Seconds(..))
+import Data.Newtype (un, unwrap)
+import Data.Time.Duration (Milliseconds(..), Seconds(..), convertDuration)
 import Effect (Effect)
+import Effect.Aff (launchAff, launchAff_)
 import Effect.Exception (throw)
 import Effect.Reactive
-  ( Event
+  ( Behaviour
+  , Event
   , Raff
   , accumE
   , bracketReact
@@ -22,8 +26,10 @@ import Effect.Reactive
   , launchRaff_
   , liftSample2
   , stepper
+  , time
   , (<&)
   )
+import Safe.Coerce (coerce)
 import Web.DOM.ChildNode (remove)
 import Web.DOM.Document (createElement)
 import Web.DOM.Element as E
@@ -34,12 +40,14 @@ import Web.HTML.HTMLElement as HE
 import Web.HTML.Window (document)
 
 main :: Effect Unit
-main = launchRaff_ do
+main = launchAff_ $ launchRaff_ do
   e <- indexed_ =<< (lift2 (<|>) getPostBuild $ intervalEvent $ Seconds 1.0)
+  -- e' <- (lift2 (<|>) getPostBuild $ intervalEvent $ Milliseconds 20.0)
   let e1 = filter (eq 0 <<< (_ `mod` 3)) e
   let e2 = filter odd e
   let e3 = aligned e1 e2
   let e4 = aligned e1 e3
+  -- ms <- time
   b <- stepper (-1) e
   paragraph "e" e
   paragraph "b <& e" $ b <& e
@@ -49,6 +57,7 @@ main = launchRaff_ do
   paragraph "e2" e2
   paragraph "e3" e3
   paragraph "e4" e4
+  pure empty
   where
   paragraph :: forall t a. Show a => String -> Event t a -> Raff t Unit
   paragraph name e = void $ bracketReact e (mkElement "p") removeElement \p a ->

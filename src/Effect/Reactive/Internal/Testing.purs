@@ -2,24 +2,23 @@ module Effect.Reactive.Internal.Testing where
 
 import Prelude
 
+import Concurrent.Queue as Queue
 import Data.Align (aligned)
 import Data.Array as Array
 import Data.Compactable (compact)
 import Data.Exists (mkExists)
-import Data.Foldable (traverse_)
 import Data.FoldableWithIndex (forWithIndex_)
 import Data.Int (toNumber)
-import Data.Maybe (Maybe(..))
-import Data.OrderedBag as OB
+import Data.Maybe (Maybe)
 import Data.These (theseLeft, theseRight)
 import Data.Time.Duration (Milliseconds(..))
-import Effect (Effect)
+import Effect.Aff (Aff)
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
   ( BuildM
   , EventRep
-  , FireTriggers(..)
   , InvokeTrigger(..)
+  , _neverE
   , getEventHandle
   )
 import Effect.Reactive.Internal.Build (fireAndRead, runBuildM, runFrame)
@@ -31,7 +30,7 @@ interpret
   :: forall a b
    . (EventRep a -> BuildM (EventRep b))
   -> Array (Maybe a)
-  -> Effect (Array (Maybe b))
+  -> Aff (Array (Maybe b))
 interpret f as = interpret2 (\e _ -> f e) as []
 
 interpret2
@@ -39,32 +38,18 @@ interpret2
    . (EventRep a -> EventRep b -> BuildM (EventRep c))
   -> Array (Maybe a)
   -> Array (Maybe b)
-  -> Effect (Array (Maybe c))
+  -> Aff (Array (Maybe c))
 interpret2 f as bs = do
-  currentTime <- Ref.new $ Milliseconds 0.0
-  postBuildSubscribers <- OB.new
-  let
-    postBuild subscriber = liftEffect do
-      _ <- OB.insert subscriber postBuildSubscribers
-      depth <- Ref.new 0
-      pure
-        { subscription:
-            { unsubscribe: OB.delete subscriber postBuildSubscribers
-            , depth
-            }
-        , occurrence: Nothing
-        }
-  runBuildM (pure postBuild) (Ref.read currentTime) (FireTriggers mempty) do
+  currentTime <- liftEffect $ Ref.new $ Milliseconds 0.0
+  queue <- Queue.new
+  r <- liftEffect $ runBuildM queue (pure _neverE) (Ref.read currentTime) do
     result <- liftEffect $ Ref.new []
     input1 <- liftEffect newInputWithTriggerRef
     input2 <- liftEffect newInputWithTriggerRef
     let ea = inputEvent input1.input
     let eb = inputEvent input2.input
     ec <- f ea eb
-    handle <- runFrame do
-      liftEffect (OB.toArray postBuildSubscribers) >>= traverse_ \subscriber ->
-        subscriber.propagate unit
-      getEventHandle ec
+    handle <- runFrame $ getEventHandle ec
     forWithIndex_ (aligned as bs) \time mab -> do
       liftEffect $ Ref.write (Milliseconds $ toNumber time) currentTime
       mTrigger1 <- liftEffect $ RM.read input1.trigger
@@ -82,3 +67,4 @@ interpret2 f as bs = do
         mc <- RM.read handle.currentValue
         Ref.modify_ (\cs -> Array.snoc cs mc) result
     liftEffect $ Ref.read result
+  pure r.result

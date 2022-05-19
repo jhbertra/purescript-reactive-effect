@@ -26,6 +26,7 @@ import Data.Traversable (traverse)
 import Data.WeakBag (WeakBag, WeakBagTicket)
 import Data.WeakBag as WeakBag
 import Effect (Effect)
+import Effect.Aff (Aff)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.RW (RWEffect(..))
 import Effect.Reader (ReaderEffect(..))
@@ -203,18 +204,18 @@ newtype InputCache a = InputCache
   , finalize :: Effect Unit
   }
 
-newtype FireTriggers = FireTriggers
-  (Array (Exists InvokeTrigger) -> Effect Unit)
+type InputTrigger a =
+  { subscribers :: WeakBag (EventSubscriber a)
+  , occurrence :: MaybeRef a
+  }
 
 newtype InvokeTrigger a = InvokeTrigger
   { value :: a
   , trigger :: InputTrigger a
   }
 
-type InputTrigger a =
-  { subscribers :: WeakBag (EventSubscriber a)
-  , occurrence :: MaybeRef a
-  }
+newtype FireTriggers = FireTriggers
+  (Array (Exists InvokeTrigger) -> Effect Unit -> Aff Unit)
 
 -------------------------------------------------------------------------------
 -- Animations

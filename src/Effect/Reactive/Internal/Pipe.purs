@@ -40,9 +40,6 @@ pipeBehaviour pipe = do
       subscribers <- liftEffect $ WeakBag.new case subscription of
         Inactive -> pure unit
         Active { unsubscribe } -> unsubscribe
-      case subscription of
-        Active { hint } -> tellHint hint
-        _ -> pure unit
       let
         getValue = case subscription of
           Active { hint: SampleContinuous } ->
@@ -51,5 +48,8 @@ pipeBehaviour pipe = do
       let cache = { subscription, subscribers, getValue }
       liftEffect $ RM.write cache pipe.cache
       pure cache
+  case cache.subscription of
+    Active { hint } -> tellHint hint
+    _ -> pure unit
   trackSubscriber cache.subscribers
   liftEffect $ cache.getValue

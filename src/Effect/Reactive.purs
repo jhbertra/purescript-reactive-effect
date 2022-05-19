@@ -5,7 +5,6 @@ module Effect.Reactive
   , Event
   , EventSelector
   , Raff
-  , RaffController
   , RaffPull
   , RaffPush
   , Timeline
@@ -43,7 +42,7 @@ module Effect.Reactive
   , liftSampleM2
   , liftSampleMaybe2
   , liftSampleMaybeM2
-  , makeEvent
+  , newAsyncEvent
   , makeEventAff
   , mapAccumB
   , mapAccumMB
@@ -57,7 +56,6 @@ module Effect.Reactive
   , partitionApply
   , partitionMapApply
   , patcher
-  , pause
   , getPostBuild
   , pull
   , pullContinuous
@@ -66,7 +64,6 @@ module Effect.Reactive
   , pushFlipped
   , pushed
   , react
-  , resume
   , sample
   , sampleApply
   , sampleApplyMaybe
@@ -86,19 +83,19 @@ module Effect.Reactive
 
 import Prelude
 
+import Concurrent.Queue as Queue
 import Control.Alt (class Alt, (<|>))
 import Control.Alternative (class Plus)
 import Control.Apply (lift2)
 import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Error.Class (catchError, throwError)
-import Control.Monad.Fix (class MonadFix, mfix, mfix2, mfix3)
+import Control.Monad.Fix (class MonadFix, mfix, mfix2)
 import Control.Monad.Reader (asks)
-import Control.Monad.Rec.Class (forever)
+import Control.Monad.Rec.Class (forever, untilJust)
 import Control.Monad.Unlift (class MonadUnlift)
 import Control.Plus (empty)
 import Data.Align (class Align, class Alignable, align)
-import Data.Array (null)
 import Data.Compactable (class Compactable, separate)
 import Data.Either (Either(..), either, hush)
 import Data.Exists (mkExists)
@@ -106,24 +103,22 @@ import Data.Filterable (class Filterable, eitherBool, filterMap, maybeBool)
 import Data.Foldable (for_, traverse_)
 import Data.HeytingAlgebra (ff, implies, tt)
 import Data.Identity (Identity(..))
-import Data.Lazy (force)
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
+import Data.Newtype (unwrap)
 import Data.Patch (class Patch)
-import Data.Queue.Priority as PQ
 import Data.These (These(..), these)
 import Data.Time.Duration
   ( class Duration
-  , Milliseconds
+  , Milliseconds(..)
   , fromDuration
   , toDuration
   )
 import Data.Traversable (Accum)
 import Data.Tuple (Tuple(..), snd)
 import Data.Tuple.Nested ((/\))
-import Data.WeakBag as WeakBag
 import Debug (class DebugWarning, traceM)
-import Effect (Effect, whileE)
+import Effect (Effect)
 import Effect.Aff (Aff, delay, killFiber, launchAff, launchAff_)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (error)
@@ -142,7 +137,7 @@ import Effect.Reactive.Internal
   , _time
   , tellHint
   ) as Internal
-import Effect.Reactive.Internal (currentDepth, propagations, updateDepth)
+import Effect.Reactive.Internal (getEventHandle)
 import Effect.Reactive.Internal.Build
   ( fireAndRead
   , liftBuild
@@ -165,12 +160,7 @@ import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
 import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
-import Effect.Unlift
-  ( class MonadUnliftEffect
-  , askRunInEffect
-  , askUnliftEffect
-  , unliftEffect
-  )
+import Effect.Unlift (class MonadUnliftEffect, askRunInEffect)
 import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 
@@ -181,11 +171,6 @@ import Safe.Coerce (coerce)
 foreign import data Timeline :: Type
 
 newtype Raff (t :: Timeline) a = Raff (Internal.BuildM a)
-
-type RaffResult a =
-  { result :: a
-  , controller :: RaffController
-  }
 
 derive newtype instance Functor (Raff t)
 derive newtype instance Apply (Raff t)
@@ -214,91 +199,30 @@ instance MonadRaff t (Raff t) where
 instance MonadRaff t (RaffPush t) where
   liftRaff (Raff m) = RaffPush $ liftBuild m
 
-launchRaff_ :: (forall t. Raff t Unit) -> Effect Unit
+launchRaff_ :: (forall t. Raff t (Event t Unit)) -> Aff Unit
 launchRaff_ m = void $ launchRaff m
 
-launchRaff :: forall a. (forall t. Raff t a) -> Effect (RaffResult a)
+launchRaff :: forall a. (forall t. Raff t (Event t a)) -> Aff a
 launchRaff (Raff m) = do
-  controller@(RaffController { isRunning, getTime }) <-
-    newRaffController
-  result /\ firePostBuild /\ _ <- mfix3 \_ _ runInEffect -> do
-    queue <- Ref.new []
-    postBuildRef <- RM.empty
-    isDrainingRef <- Ref.new false
-    let
-      firePostBuild _ = do
-        mPostBuild <- RM.read postBuildRef
-        for_ mPostBuild \{ subscribers } -> do
-          RM.clear postBuildRef
-          runInEffect $ runFrame do
-            WeakBag.traverseMembers_ (\s -> s.propagate unit) subscribers
-            -- drain propagations
-            propagationsQ <- propagations
-            u <- askUnliftEffect
-            liftEffect $ PQ.drain propagationsQ \depth evaluate ->
-              unliftEffect u do
-                cd <- currentDepth
-                updateDepth depth
-                unless (depth < cd) evaluate
-    let
-      fireTriggers triggers = whenM isRunning do
-        isDraining <- Ref.read isDrainingRef
-        if isDraining then
-          Ref.modify_ (_ <> triggers) queue
-        else do
-          Ref.write true isDrainingRef
-          Ref.write triggers queue
-          whileE (not <<< null <$> Ref.read queue) do
-            ts <- Ref.read queue
-            Ref.write [] queue
-            runInEffect $ fireAndRead ts $ pure unit
-            firePostBuild unit
-          Ref.write false isDrainingRef
-    let
-      getPostBuild' = RM.read postBuildRef >>= case _ of
-        Just { postBuild } -> pure postBuild
-        Nothing -> do
-          subscribers <- WeakBag.new $ RM.clear postBuildRef
-          let
-            postBuild subscriber = liftEffect do
-              ticket <- WeakBag.insert subscriber subscribers
-              depth <- Ref.new 0
-              pure
-                { subscription:
-                    { unsubscribe: WeakBag.destroyTicket ticket
-                    , depth
-                    }
-                , occurrence: Nothing
-                }
-          RM.write { postBuild, subscribers } postBuildRef
-          pure postBuild
-    runBuildM getPostBuild' getTime (Internal.FireTriggers fireTriggers) do
-      runInEffect' <- askRunInEffect
-      result <- m
+  queue <- Queue.new
+  let getPostBuild' = pure $ let Event e = empty in e
+  { result, fire } <- liftEffect $ runBuildM queue getPostBuild' (pure mempty)
+    do
+      runInEffect <- askRunInEffect
+      Event eResult <- m
       runFrame do
-        liftEffect $ resume controller
-        pure $ pure result /\ firePostBuild /\ runInEffect'
-  firePostBuild unit
-  pure { controller, result: force result }
-
-foreign import newRaffController :: Effect RaffController
-
--------------------------------------------------------------------------------
--- Raff Controller
--------------------------------------------------------------------------------
-
-newtype RaffController = RaffController
-  { isRunning :: Effect Boolean
-  , getTime :: Effect Milliseconds
-  , pause :: Effect Unit
-  , resume :: Effect Unit
-  }
-
-pause :: RaffController -> Effect Unit
-pause (RaffController controller) = controller.pause
-
-resume :: RaffController -> Effect Unit
-resume (RaffController controller) = controller.resume
+        eResultHandle <- getEventHandle eResult
+        liftEffect do
+          mResult <- RM.read eResultHandle.currentValue
+          pure $ eResultHandle /\ mResult /\ runInEffect
+  let eResultHandle /\ mResult /\ runInEffect = result
+  case mResult of
+    Just result -> pure result
+    Nothing -> untilJust do
+      { triggers, onComplete } <- Queue.read queue
+      liftEffect $ runInEffect $ fireAndRead triggers do
+        onComplete
+        RM.read eResultHandle.currentValue
 
 -------------------------------------------------------------------------------
 -- RaffPush monad
@@ -434,16 +358,28 @@ derive newtype instance Lazy (Event t a)
 getPostBuild :: forall t. Raff t (Event t Unit)
 getPostBuild = coerce Internal._postBuild
 
-makeEvent
+newAsyncEventWithOnComplete
+  :: forall t m a
+   . MonadRaff t m
+  => ((a -> Effect Unit -> Effect Unit) -> Effect (Effect Unit))
+  -> m (Event t a)
+newAsyncEventWithOnComplete subscribe = liftRaff $ Raff do
+  Internal.FireTriggers fireTriggers <- asks _.fireTriggers
+  input <- liftEffect $ newInput \trigger ->
+    subscribe \value onComplete -> launchAff_ $
+      fireTriggers
+        [ mkExists $ Internal.InvokeTrigger { trigger, value } ]
+        onComplete
+
+  pure $ Event $ inputEvent input
+
+newAsyncEvent
   :: forall t m a
    . MonadRaff t m
   => ((a -> Effect Unit) -> Effect (Effect Unit))
   -> m (Event t a)
-makeEvent subscribe = liftRaff $ Raff do
-  Internal.FireTriggers fireTriggers <- asks _.fireTriggers
-  input <- liftEffect $ newInput \trigger -> subscribe \value ->
-    fireTriggers [ mkExists $ Internal.InvokeTrigger { trigger, value } ]
-  pure $ Event $ inputEvent input
+newAsyncEvent subscribe = newAsyncEventWithOnComplete \fire ->
+  subscribe \value -> fire value $ pure unit
 
 delayEvent :: forall d t m. Duration d => MonadRaff t m => d -> m (Event t Unit)
 delayEvent d = makeEventAff \fire -> do
@@ -461,7 +397,7 @@ makeEventAff
    . MonadRaff t m
   => ((a -> Aff Unit) -> Aff Unit)
   -> m (Event t a)
-makeEventAff f = makeEvent \fire -> do
+makeEventAff f = newAsyncEvent \fire -> do
   fiber <- launchAff $ f $ liftEffect <<< fire
   pure $ launchAff_ $ killFiber (error "killed") fiber
 
@@ -472,10 +408,10 @@ newEvent = liftRaff $ Raff do
   pure
     { event: Event $ inputEvent input
     , fire: \value -> do
-        mTrigger <- liftEffect $ RM.read trigger
-        for_ mTrigger \t ->
-          fireTriggers
-            [ mkExists $ Internal.InvokeTrigger { trigger: t, value } ]
+        mTrigger <- RM.read trigger
+        for_ mTrigger \t -> launchAff_ $ fireTriggers
+          [ mkExists $ Internal.InvokeTrigger { trigger: t, value } ]
+          (pure unit)
     }
 
 push :: forall t a b. (a -> RaffPush t (Maybe b)) -> Event t a -> Event t b
@@ -987,7 +923,7 @@ interpret
   :: forall a b
    . (forall t. Event t a -> Raff t (Event t b))
   -> Array (Maybe a)
-  -> Effect (Array (Maybe b))
+  -> Aff (Array (Maybe b))
 interpret f = interpret2 (const f) []
 
 interpret2
@@ -995,9 +931,9 @@ interpret2
    . (forall t. Event t a -> Event t b -> Raff t (Event t c))
   -> Array (Maybe a)
   -> Array (Maybe b)
-  -> Effect (Array (Maybe c))
+  -> Aff (Array (Maybe c))
 interpret2 f as bs = do
-  liftEffect $ Internal.interpret2
+  Internal.interpret2
     ( \e1 e2 -> do
         Event e3 <- coerce f (Event e1) (Event e2)
         pure e3
