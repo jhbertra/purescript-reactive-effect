@@ -127,7 +127,6 @@ import Effect.Reactive.Internal
   ( BehaviourRep
   , BuildM
   , EventRep
-  , FireTriggers(..)
   , InvokeTrigger(..)
   , PropagateM
   , SampleHint(..)
@@ -137,13 +136,8 @@ import Effect.Reactive.Internal
   , _time
   , tellHint
   ) as Internal
-import Effect.Reactive.Internal (getEventHandle)
-import Effect.Reactive.Internal.Build
-  ( fireAndRead
-  , liftBuild
-  , runBuildM
-  , runFrame
-  )
+import Effect.Reactive.Internal (FireTriggers(..), getEventHandle)
+import Effect.Reactive.Internal.Build (liftBuild, runBuildM, runFrame)
 import Effect.Reactive.Internal.Cached (_cached) as Internal
 import Effect.Reactive.Internal.Fan (mapFanEvent)
 import Effect.Reactive.Internal.Input
@@ -160,7 +154,7 @@ import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
 import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
-import Effect.Unlift (class MonadUnliftEffect, askRunInEffect)
+import Effect.Unlift (class MonadUnliftEffect)
 import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 
@@ -199,28 +193,27 @@ instance MonadRaff t (Raff t) where
 instance MonadRaff t (RaffPush t) where
   liftRaff (Raff m) = RaffPush $ liftBuild m
 
-launchRaff_ :: (forall t. Raff t (Event t Unit)) -> Aff Unit
+launchRaff_ :: forall a. (forall t. Raff t (Event t a)) -> Aff Unit
 launchRaff_ m = void $ launchRaff m
 
 launchRaff :: forall a. (forall t. Raff t (Event t a)) -> Aff a
 launchRaff (Raff m) = do
   queue <- Queue.new
   let getPostBuild' = pure $ let Event e = empty in e
-  { result, fire } <- liftEffect $ runBuildM queue getPostBuild' (pure mempty)
-    do
-      runInEffect <- askRunInEffect
+  { result, fire: FireTriggers fire } <-
+    liftEffect $ runBuildM queue getPostBuild' (pure mempty) do
       Event eResult <- m
       runFrame do
         eResultHandle <- getEventHandle eResult
         liftEffect do
           mResult <- RM.read eResultHandle.currentValue
-          pure $ eResultHandle /\ mResult /\ runInEffect
-  let eResultHandle /\ mResult /\ runInEffect = result
+          pure $ eResultHandle /\ mResult
+  let eResultHandle /\ mResult = result
   case mResult of
-    Just result -> pure result
+    Just a -> pure a
     Nothing -> untilJust do
       { triggers, onComplete } <- Queue.read queue
-      liftEffect $ runInEffect $ fireAndRead triggers do
+      liftEffect $ fire triggers do
         onComplete
         RM.read eResultHandle.currentValue
 
@@ -364,12 +357,14 @@ newAsyncEventWithOnComplete
   => ((a -> Effect Unit -> Effect Unit) -> Effect (Effect Unit))
   -> m (Event t a)
 newAsyncEventWithOnComplete subscribe = liftRaff $ Raff do
-  Internal.FireTriggers fireTriggers <- asks _.fireTriggers
+  triggerQueue <- asks _.triggerQueue
   input <- liftEffect $ newInput \trigger ->
-    subscribe \value onComplete -> launchAff_ $
-      fireTriggers
-        [ mkExists $ Internal.InvokeTrigger { trigger, value } ]
-        onComplete
+    subscribe \value onComplete -> launchAff_ do
+      Queue.write
+        triggerQueue
+        { triggers: [ mkExists $ Internal.InvokeTrigger { trigger, value } ]
+        , onComplete
+        }
 
   pure $ Event $ inputEvent input
 
@@ -404,14 +399,18 @@ makeEventAff f = newAsyncEvent \fire -> do
 newEvent :: forall t m a. MonadRaff t m => m (EventIO t a)
 newEvent = liftRaff $ Raff do
   { input, trigger } <- liftEffect newInputWithTriggerRef
-  Internal.FireTriggers fireTriggers <- asks _.fireTriggers
+  triggerQueue <- asks _.triggerQueue
   pure
     { event: Event $ inputEvent input
     , fire: \value -> do
         mTrigger <- RM.read trigger
-        for_ mTrigger \t -> launchAff_ $ fireTriggers
-          [ mkExists $ Internal.InvokeTrigger { trigger: t, value } ]
-          (pure unit)
+        for_ mTrigger \t -> launchAff_ do
+          Queue.write
+            triggerQueue
+            { triggers:
+                [ mkExists $ Internal.InvokeTrigger { trigger: t, value } ]
+            , onComplete: (pure unit)
+            }
     }
 
 push :: forall t a b. (a -> RaffPush t (Maybe b)) -> Event t a -> Event t b

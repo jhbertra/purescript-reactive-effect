@@ -2,6 +2,7 @@ module Effect.Reactive.Internal where
 
 import Prelude
 
+import Concurrent.Queue (Queue)
 import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Fix (class MonadFix)
@@ -26,7 +27,6 @@ import Data.Traversable (traverse)
 import Data.WeakBag (WeakBag, WeakBagTicket)
 import Data.WeakBag as WeakBag
 import Effect (Effect)
-import Effect.Aff (Aff)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.RW (RWEffect(..))
 import Effect.Reader (ReaderEffect(..))
@@ -215,7 +215,7 @@ newtype InvokeTrigger a = InvokeTrigger
   }
 
 newtype FireTriggers = FireTriggers
-  (Array (Exists InvokeTrigger) -> Effect Unit -> Aff Unit)
+  (forall a. Array (Exists InvokeTrigger) -> Effect a -> Effect a)
 
 -------------------------------------------------------------------------------
 -- Animations
@@ -328,8 +328,13 @@ newtype Reaction a = Reaction
 
 newtype BuildM a = BM (ReaderEffect BuildEnv a)
 
+type FireParams =
+  { triggers :: Array (Exists InvokeTrigger)
+  , onComplete :: Effect Unit
+  }
+
 type BuildEnv' r =
-  { fireTriggers :: FireTriggers
+  { triggerQueue :: Queue FireParams
   , reactors :: OrderedBag (Exists Reactor)
   , newLatches :: ExistentialQueue Latch
   , newReactors :: ExistentialQueue Reactor

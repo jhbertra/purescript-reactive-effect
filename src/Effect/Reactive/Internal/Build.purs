@@ -3,7 +3,6 @@ module Effect.Reactive.Internal.Build where
 import Prelude
 
 import Concurrent.Queue (Queue)
-import Concurrent.Queue as Queue
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (for_, traverse_)
 import Data.Lazy (force)
@@ -24,6 +23,7 @@ import Effect.Reactive.Internal
   , BuildM(..)
   , Clear(..)
   , EventRep
+  , FireParams
   , FireTriggers(..)
   , InvokeTrigger(..)
   , JoinReset(..)
@@ -46,6 +46,7 @@ import Effect.Reader (ReaderEffect(..), runReaderEffect)
 import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
 import Effect.Unlift (askUnliftEffect, unliftEffect)
+import Safe.Coerce (coerce)
 
 initializeLatch :: forall m a. MonadBuild m => Latch a -> m Unit
 initializeLatch latch = liftBuild $ BM $ RE \env ->
@@ -65,7 +66,7 @@ instance MonadBuild BuildM where
 instance MonadBuild PropagateM where
   liftBuild (BM m) =
     PM $ RE
-      \{ fireTriggers
+      \{ triggerQueue
        , newLatches
        , newReactors
        , reactors
@@ -74,7 +75,7 @@ instance MonadBuild PropagateM where
        } ->
         runReaderEffect
           m
-          { fireTriggers
+          { triggerQueue
           , newLatches
           , newReactors
           , reactors
@@ -84,22 +85,23 @@ instance MonadBuild PropagateM where
 
 runBuildM
   :: forall a
-   . Queue
-       ({ triggers :: Array (Exists InvokeTrigger), onComplete :: Effect Unit })
+   . Queue FireParams
   -> Effect (EventRep Unit)
   -> Effect Milliseconds
   -> BuildM a
   -> Effect { fire :: FireTriggers, result :: a }
-runBuildM fireQueue getPostBuild getTime (BM m) = do
+runBuildM triggerQueue getPostBuild getTime (BM m) = do
   newLatches <- EQ.new
   newReactors <- EQ.new
   reactors <- OB.new
   let
-    fireTriggers = FireTriggers \triggers onComplete ->
-      Queue.write fireQueue { triggers, onComplete }
-  result <- runReaderEffect m
-    { fireTriggers, newLatches, newReactors, reactors, getTime, getPostBuild }
-  pure { fire: fireTriggers, result }
+    env =
+      { triggerQueue, newLatches, newReactors, reactors, getTime, getPostBuild }
+  result <- runReaderEffect m env
+  let
+    fire = FireTriggers \triggers read ->
+      runReaderEffect (coerce $ fireAndRead triggers read) env
+  pure { fire, result }
 
 fireAndRead :: forall a. Array (Exists InvokeTrigger) -> Effect a -> BuildM a
 fireAndRead triggers read = runFrame do
@@ -132,7 +134,7 @@ runFrame frame = BM $ RE \buildEnv -> do
   let
     propagateEnv :: PropagateEnv
     propagateEnv =
-      { fireTriggers: buildEnv.fireTriggers
+      { triggerQueue: buildEnv.triggerQueue
       , reactors: buildEnv.reactors
       , newLatches: buildEnv.newLatches
       , newReactors: buildEnv.newReactors

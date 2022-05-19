@@ -12,11 +12,10 @@ import Data.Maybe (Maybe(..))
 import Data.Newtype (un, unwrap)
 import Data.Time.Duration (Milliseconds(..), Seconds(..), convertDuration)
 import Effect (Effect)
-import Effect.Aff (launchAff, launchAff_)
+import Effect.Aff (launchAff_)
 import Effect.Exception (throw)
 import Effect.Reactive
-  ( Behaviour
-  , Event
+  ( Event
   , Raff
   , accumE
   , bracketReact
@@ -29,7 +28,6 @@ import Effect.Reactive
   , time
   , (<&)
   )
-import Safe.Coerce (coerce)
 import Web.DOM.ChildNode (remove)
 import Web.DOM.Document (createElement)
 import Web.DOM.Element as E
