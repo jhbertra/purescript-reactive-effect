@@ -18,7 +18,6 @@ import Effect.Reactive.Internal
   ( BuildM
   , EventRep
   , InvokeTrigger(..)
-  , _neverE
   , getEventHandle
   )
 import Effect.Reactive.Internal.Build (fireAndRead, runBuildM, runFrame)
@@ -42,7 +41,7 @@ interpret2
 interpret2 f as bs = do
   currentTime <- liftEffect $ Ref.new $ Milliseconds 0.0
   queue <- Queue.new
-  r <- liftEffect $ runBuildM queue (pure _neverE) (Ref.read currentTime) do
+  r <- liftEffect $ runBuildM queue (Ref.read currentTime) do
     result <- liftEffect $ Ref.new []
     input1 <- liftEffect newInputWithTriggerRef
     input2 <- liftEffect newInputWithTriggerRef

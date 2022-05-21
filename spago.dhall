@@ -5,7 +5,6 @@
   [ "aff"
   , "arrays"
   , "bifunctors"
-  , "catenable-lists"
   , "concurrent-queues"
   , "control"
   , "datetime"

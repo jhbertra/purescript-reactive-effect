@@ -22,7 +22,6 @@ import Effect.Reactive.Internal
   , BehaviourSubscription(..)
   , BuildM(..)
   , Clear(..)
-  , EventRep
   , FireParams
   , FireTriggers(..)
   , InvokeTrigger(..)
@@ -40,6 +39,7 @@ import Effect.Reactive.Internal
   , updateDepth
   , writeNowClearLater
   )
+import Effect.Reactive.Internal.Input (inputEvent, newInputWithTriggerRef)
 import Effect.Reactive.Internal.Join (recalculateJoinDepth)
 import Effect.Reactive.Internal.Switch (switchSubscriber)
 import Effect.Reader (ReaderEffect(..), runReaderEffect)
@@ -71,7 +71,7 @@ instance MonadBuild PropagateM where
        , newReactors
        , reactors
        , getTime
-       , getPostBuild
+       , asap
        } ->
         runReaderEffect
           m
@@ -80,28 +80,30 @@ instance MonadBuild PropagateM where
           , newReactors
           , reactors
           , getTime
-          , getPostBuild
+          , asap
           }
 
 runBuildM
   :: forall a
    . Queue FireParams
-  -> Effect (EventRep Unit)
   -> Effect Milliseconds
   -> BuildM a
   -> Effect { fire :: FireTriggers, result :: a }
-runBuildM triggerQueue getPostBuild getTime (BM m) = do
+runBuildM triggerQueue getTime (BM m) = do
   newLatches <- EQ.new
   newReactors <- EQ.new
   reactors <- OB.new
+  asapIO <- newInputWithTriggerRef
+  let asap = inputEvent asapIO.input
+  let env = { triggerQueue, newLatches, newReactors, reactors, getTime, asap }
   let
-    env =
-      { triggerQueue, newLatches, newReactors, reactors, getTime, getPostBuild }
-  result <- runReaderEffect m env
-  let
-    fire = FireTriggers \triggers read ->
+    fire@(FireTriggers fire') = FireTriggers \triggers read ->
       runReaderEffect (coerce $ fireAndRead triggers read) env
-  pure { fire, result }
+  result <- runReaderEffect m env
+  mAsapTrigger <- RM.read asapIO.trigger
+  for_ mAsapTrigger \trigger ->
+    fire' [ mkExists $ InvokeTrigger { trigger, value: unit } ] $ pure unit
+  pure { result, fire }
 
 fireAndRead :: forall a. Array (Exists InvokeTrigger) -> Effect a -> BuildM a
 fireAndRead triggers read = runFrame do
@@ -131,6 +133,8 @@ runFrame frame = BM $ RE \buildEnv -> do
   joinResets <- EQ.new
   currentDepthRef <- Ref.new $ -1
   propagationsQ <- PQ.new
+  asapIO <- newInputWithTriggerRef
+  let asap = inputEvent asapIO.input
   let
     propagateEnv :: PropagateEnv
     propagateEnv =
@@ -138,8 +142,8 @@ runFrame frame = BM $ RE \buildEnv -> do
       , reactors: buildEnv.reactors
       , newLatches: buildEnv.newLatches
       , newReactors: buildEnv.newReactors
-      , getPostBuild: buildEnv.getPostBuild
       , getTime: buildEnv.getTime
+      , asap
       , clears
       , reactions
       , latchUpdates
@@ -207,6 +211,13 @@ runFrame frame = BM $ RE \buildEnv -> do
     Reaction { reactor: Reactor { connection }, value } -> do
       mConnection <- RM.read connection
       for_ mConnection \{ fire } -> fire value
+  -- fire ASAP
+  mAsapTrigger <- RM.read asapIO.trigger
+  for_ mAsapTrigger \trigger -> do
+    let triggers = [ mkExists $ InvokeTrigger { trigger, value: unit } ]
+    runReaderEffect
+      (let (BM m) = fireAndRead triggers $ pure unit in m)
+      buildEnv
   pure result
 
 runPropagateM :: forall a. PropagateEnv -> PropagateM a -> Effect a

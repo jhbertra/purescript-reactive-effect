@@ -42,7 +42,7 @@ module Effect.Reactive
   , liftSampleM2
   , liftSampleMaybe2
   , liftSampleMaybeM2
-  , newAsyncEvent
+  , makeEvent
   , makeEventAff
   , mapAccumB
   , mapAccumMB
@@ -56,7 +56,7 @@ module Effect.Reactive
   , partitionApply
   , partitionMapApply
   , patcher
-  , getPostBuild
+  , asap
   , pull
   , pullContinuous
   , push
@@ -105,15 +105,9 @@ import Data.HeytingAlgebra (ff, implies, tt)
 import Data.Identity (Identity(..))
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
-import Data.Newtype (unwrap)
 import Data.Patch (class Patch)
 import Data.These (These(..), these)
-import Data.Time.Duration
-  ( class Duration
-  , Milliseconds(..)
-  , fromDuration
-  , toDuration
-  )
+import Data.Time.Duration (class Duration, fromDuration, toDuration)
 import Data.Traversable (Accum)
 import Data.Tuple (Tuple(..), snd)
 import Data.Tuple.Nested ((/\))
@@ -130,8 +124,8 @@ import Effect.Reactive.Internal
   , InvokeTrigger(..)
   , PropagateM
   , SampleHint(..)
+  , _asap
   , _neverE
-  , _postBuild
   , _pushRaw
   , _time
   , tellHint
@@ -152,7 +146,6 @@ import Effect.Reactive.Internal.Pipe (_pull)
 import Effect.Reactive.Internal.Reaction (_react)
 import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
-import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
 import Effect.Unlift (class MonadUnliftEffect)
 import Effect.Unsafe (unsafePerformEffect)
@@ -199,9 +192,8 @@ launchRaff_ m = void $ launchRaff m
 launchRaff :: forall a. (forall t. Raff t (Event t a)) -> Aff a
 launchRaff (Raff m) = do
   queue <- Queue.new
-  let getPostBuild' = pure $ let Event e = empty in e
   { result, fire: FireTriggers fire } <-
-    liftEffect $ runBuildM queue getPostBuild' (pure mempty) do
+    liftEffect $ runBuildM queue (pure mempty) do
       Event eResult <- m
       runFrame do
         eResultHandle <- getEventHandle eResult
@@ -230,14 +222,6 @@ derive newtype instance Apply (RaffPush t)
 derive newtype instance Applicative (RaffPush t)
 derive newtype instance Bind (RaffPush t)
 derive newtype instance Monad (RaffPush t)
-derive newtype instance MonadEffect (RaffPush t)
-derive newtype instance MonadUnliftEffect (RaffPush t)
-instance MonadBase (RaffPush t) (RaffPush t) where
-  liftBase = identity
-
-instance MonadUnlift (RaffPush t) (RaffPush t) where
-  withRunInBase runAction = runAction identity
-
 derive newtype instance MonadFix (RaffPush t)
 derive newtype instance Semigroup a => Semigroup (RaffPush t a)
 derive newtype instance Monoid a => Monoid (RaffPush t a)
@@ -255,14 +239,6 @@ derive newtype instance Apply (RaffPull t)
 derive newtype instance Applicative (RaffPull t)
 derive newtype instance Bind (RaffPull t)
 derive newtype instance Monad (RaffPull t)
-derive newtype instance MonadEffect (RaffPull t)
-derive newtype instance MonadUnliftEffect (RaffPull t)
-instance MonadBase (RaffPull t) (RaffPull t) where
-  liftBase = identity
-
-instance MonadUnlift (RaffPull t) (RaffPull t) where
-  withRunInBase runAction = runAction identity
-
 derive newtype instance MonadFix (RaffPull t)
 derive newtype instance Semigroup a => Semigroup (RaffPull t a)
 derive newtype instance Monoid a => Monoid (RaffPull t a)
@@ -274,7 +250,7 @@ instance MonadPull t (Raff t) where
   liftPull (RaffPull m) = liftEffect $ snd <$> runRWEffect m Nothing
 
 instance MonadPull t (RaffPush t) where
-  liftPull (RaffPull m) = liftEffect $ snd <$> runRWEffect m Nothing
+  liftPull (RaffPull m) = RaffPush $ liftEffect $ snd <$> runRWEffect m Nothing
 
 instance MonadPull t (RaffPull t) where
   liftPull = coerce
@@ -348,15 +324,15 @@ instance Semigroup a => Monoid (Event t a) where
 
 derive newtype instance Lazy (Event t a)
 
-getPostBuild :: forall t. Raff t (Event t Unit)
-getPostBuild = coerce Internal._postBuild
+asap :: forall t. Raff t (Event t Unit)
+asap = coerce Internal._asap
 
-newAsyncEventWithOnComplete
+makeEventWithFireCallback
   :: forall t m a
    . MonadRaff t m
   => ((a -> Effect Unit -> Effect Unit) -> Effect (Effect Unit))
   -> m (Event t a)
-newAsyncEventWithOnComplete subscribe = liftRaff $ Raff do
+makeEventWithFireCallback subscribe = liftRaff $ Raff do
   triggerQueue <- asks _.triggerQueue
   input <- liftEffect $ newInput \trigger ->
     subscribe \value onComplete -> launchAff_ do
@@ -368,12 +344,12 @@ newAsyncEventWithOnComplete subscribe = liftRaff $ Raff do
 
   pure $ Event $ inputEvent input
 
-newAsyncEvent
+makeEvent
   :: forall t m a
    . MonadRaff t m
   => ((a -> Effect Unit) -> Effect (Effect Unit))
   -> m (Event t a)
-newAsyncEvent subscribe = newAsyncEventWithOnComplete \fire ->
+makeEvent subscribe = makeEventWithFireCallback \fire ->
   subscribe \value -> fire value $ pure unit
 
 delayEvent :: forall d t m. Duration d => MonadRaff t m => d -> m (Event t Unit)
@@ -392,7 +368,7 @@ makeEventAff
    . MonadRaff t m
   => ((a -> Aff Unit) -> Aff Unit)
   -> m (Event t a)
-makeEventAff f = newAsyncEvent \fire -> do
+makeEventAff f = makeEvent \fire -> do
   fiber <- launchAff $ f $ liftEffect <<< fire
   pure $ launchAff_ $ killFiber (error "killed") fiber
 
