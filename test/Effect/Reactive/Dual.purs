@@ -17,9 +17,7 @@ import Data.Filterable
   , partition
   , partitionMap
   )
-import Data.Int (toNumber)
 import Data.Maybe (Maybe)
-import Data.Time.Duration (Milliseconds(..))
 import Effect.Aff (Aff)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Effect.Reactive as R
@@ -297,6 +295,6 @@ liftSample2
 liftSample2 f (B mb b) (E me e) =
   E (M.liftSample2 f mb me) (R.liftSample2 f b e)
 
-time :: forall t. Raff t (Behaviour t Milliseconds)
-time =
-  R (pure $ liftBM $ Milliseconds <<< toNumber <$> M.timeB) $ liftBR <$> R.time
+-- time :: forall t. Raff t (Behaviour t Milliseconds)
+-- time =
+--   R (pure $ liftBM $ Milliseconds <<< toNumber <$> M.timeB) $ liftBR <$> R.time

@@ -19,7 +19,6 @@ import Effect.Class (class MonadEffect, liftEffect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
   ( BehaviourSubscriber(..)
-  , BehaviourSubscription(..)
   , BuildM(..)
   , Clear(..)
   , EventRep
@@ -197,19 +196,16 @@ runFrame frame = BM $ RE \buildEnv -> do
   EQ.drain switchesInvalidated \(SwitchCache cache) -> do
     -- switch off old parent
     oldParent <- Ref.read cache.currentParent
-    oldSubscription <- Ref.read cache.subscription
-    case oldSubscription of
-      Active { unsubscribe } -> unsubscribe
-      _ -> pure unit
+    join $ Ref.read cache.invalidator
     oldParent.unsubscribe
     -- pull new parent
-    Tuple pullSubscription e <- runRWEffect cache.parent
+    Tuple invalidator e <- runRWEffect cache.parent
       $ Just
       $ mkExists
       $ SwitchSubscriber
       $ pure
       $ SwitchCache cache
-    Ref.write pullSubscription cache.subscription
+    Ref.write invalidator cache.invalidator
     -- switch to new parent
     let subscriber = switchSubscriber $ pure $ SwitchCache cache
     { subscription } <- runPropagateM propagateEnv $ _subscribe e $ subscriber

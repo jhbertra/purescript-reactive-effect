@@ -96,3 +96,8 @@ execRWEffect :: forall r w a. Monoid w => RWEffect r w a -> r -> Effect w
 execRWEffect m r = do
   Tuple w _ <- runRWEffect m r
   pure w
+
+evalRWEffect :: forall r w a. Monoid w => RWEffect r w a -> r -> Effect a
+evalRWEffect m r = do
+  Tuple _ a <- runRWEffect m r
+  pure a

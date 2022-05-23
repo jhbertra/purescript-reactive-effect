@@ -60,14 +60,14 @@ subscribeSwitchCache switch subscriber = do
         currentParent <- Ref.new subscription
         currentDepth <- Ref.read subscription.depth
         depth <- Ref.new currentDepth
-        pullSubscriptionRef <- Ref.new pullSubscription
+        invalidator <- Ref.new pullSubscription
         let
           c = SwitchCache
             { currentParent
             , occurrence: occurrenceRef
             , depth
             , subscribers
-            , subscription: pullSubscriptionRef
+            , invalidator
             , parent: switch.parent
             }
         RM.write c switch.cache

@@ -61,7 +61,6 @@ module Effect.Reactive
   , performAsyncWithSetup
   , performWithSetup
   , pull
-  , pullContinuous
   , push
   , pushAlways
   , pushFlipped
@@ -78,7 +77,7 @@ module Effect.Reactive
   , switcher
   , tag
   , tagMaybe
-  , time
+  -- , time
   , traceEvent
   , traceEventWith
   ) where
@@ -108,7 +107,7 @@ import Data.Map (Map)
 import Data.Maybe (Maybe(..))
 import Data.Patch (class Patch)
 import Data.These (These(..), these)
-import Data.Time.Duration (class Duration, fromDuration, toDuration)
+import Data.Time.Duration (class Duration, fromDuration)
 import Data.Traversable (Accum)
 import Data.Tuple (Tuple(..), snd)
 import Data.Tuple.Nested ((/\))
@@ -125,12 +124,10 @@ import Effect.Reactive.Internal
   , InvokeTrigger(..)
   , PerformParent(..)
   , PropagateM
-  , SampleHint(..)
   , _asap
   , _neverE
   , _pushRaw
-  , _time
-  , tellHint
+  -- , _time
   ) as Internal
 import Effect.Reactive.Internal (FireTriggers(..), getEventHandle)
 import Effect.Reactive.Internal.Build (liftBuild, runBuildM, runFrame)
@@ -703,14 +700,10 @@ instance BooleanAlgebra a => BooleanAlgebra (Behaviour t a)
 pull :: forall t a. RaffPull t a -> Behaviour t a
 pull = coerce (_pull :: Internal.BehaviourRep a -> Internal.BehaviourRep a)
 
-pullContinuous :: forall t a. RaffPull t a -> Behaviour t a
-pullContinuous (RaffPull m) =
-  pull $ RaffPull $ Internal.tellHint Internal.SampleContinuous *> m
-
-time :: forall t m d. MonadRaff t m => Duration d => m (Behaviour t d)
-time = do
-  b <- liftRaff $ Raff Internal._time
-  pure $ toDuration <$> Behaviour b
+-- time :: forall t m d. MonadRaff t m => Duration d => m (Behaviour t d)
+-- time = do
+--   b <- liftRaff $ Raff Internal._time
+--   pure $ toDuration <$> Behaviour b
 
 patcher
   :: forall patch t m a

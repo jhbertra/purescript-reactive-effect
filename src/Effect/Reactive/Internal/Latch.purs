@@ -13,10 +13,8 @@ import Effect.Reactive.Internal
   , EventRep
   , Latch(..)
   , LatchUpdate(..)
-  , SampleHint(..)
   , _subscribe
   , invalidateBehaviourSubscriber
-  , tellHint
   , terminalSubscriber
   , trackSubscriber
   , updateLatch
@@ -66,7 +64,6 @@ newLatch initialValue updateOn = do
 latchBehaviour :: forall a. Latch a -> BehaviourRep a
 latchBehaviour (Latch latch) = do
   value <- liftEffect $ Ref.read latch.value
-  tellHint SampleOnce
   trackSubscriber latch.subscribers
   pure value
 

@@ -6,31 +6,26 @@ import Control.Monad.Fix (mfix)
 import Data.Exists (mkExists)
 import Data.Lazy (force)
 import Data.Maybe (Maybe(..))
-import Data.Tuple (Tuple(..))
 import Effect (Effect)
-import Effect.RW (runRWEffect)
+import Effect.RW (evalRWEffect)
 import Effect.Reactive.Internal
-  ( AnimationInitialized
+  ( Animation
   , BehaviourRep
   , BehaviourSubscriber(..)
-  , BehaviourSubscription
   )
 
-type InitializeAnimation a =
-  Effect (Tuple BehaviourSubscription a)
-  -> BehaviourSubscription
-  -> a
-  -> Effect AnimationInitialized
+type Sampler = Effect
+
+type InitializeAnimation a = Sampler a -> Effect Animation
 
 animate
   :: forall a. BehaviourRep a -> InitializeAnimation a -> Effect (Effect Unit)
 animate behaviour initialize = do
-  _.dispose <<< force <$> mfix \linitialized -> do
+  _.dispose <<< force <$> mfix \lanimation -> do
     let
-      sampler = runRWEffect behaviour
+      sampler = evalRWEffect behaviour
         $ Just
         $ mkExists
-        $ AnimationSubscriber 0 linitialized
-    Tuple subscription a <- sampler
-    initialized <- initialize sampler subscription a
-    pure $ pure initialized
+        $ AnimationSubscriber 0 lanimation
+    animation <- initialize sampler
+    pure $ pure animation

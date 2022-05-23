@@ -9,7 +9,6 @@ import Control.Monad.Fix (class MonadFix)
 import Control.Monad.Reader (class MonadAsk, class MonadReader, asks, local)
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Unlift (class MonadUnlift)
-import Control.Monad.Writer (tell)
 import Data.Exists (Exists, runExists)
 import Data.Foldable (for_, traverse_)
 import Data.Lazy (force)
@@ -77,59 +76,24 @@ invalidDepth = -2
 -- Behaviours
 -------------------------------------------------------------------------------
 
-type BehaviourRep a = RWEffect BehaviourEnv BehaviourSubscription a
+type BehaviourRep a = RWEffect BehaviourEnv Invalidator a
 
 type BehaviourEnv = Maybe SomeBehaviourSubscriber
+
+type Invalidator = Effect Unit
 
 data BehaviourSubscriber a
   = PipeSubscriber (Pipe a)
   | SwitchSubscriber (DL.Lazy (SwitchCache a))
-  | AnimationSubscriber Int (DL.Lazy AnimationInitialized)
-
-data SampleHint
-  = SampleOnce
-  | SampleContinuous
-
-instance Semigroup SampleHint where
-  append SampleContinuous _ = SampleContinuous
-  append _ b = b
-
-instance Monoid SampleHint where
-  mempty = SampleOnce
+  | AnimationSubscriber Int (DL.Lazy Animation)
 
 type SomeBehaviourSubscriber = Exists BehaviourSubscriber
-data BehaviourSubscription
-  = Inactive
-  | Active
-      { hint :: SampleHint
-      , unsubscribe :: Effect Unit
-      }
-
-instance Semigroup BehaviourSubscription where
-  append Inactive b = b
-  append a Inactive = a
-  append (Active a) (Active b) = Active
-    { hint: a.hint <> b.hint
-    , unsubscribe: a.unsubscribe *> b.unsubscribe
-    }
-
-instance Monoid BehaviourSubscription where
-  mempty = Inactive
-
-tellHint :: SampleHint -> BehaviourRep Unit
-tellHint hint = tell $ Active { hint, unsubscribe: pure unit }
 
 trackSubscriber :: WeakBag SomeBehaviourSubscriber -> BehaviourRep Unit
 trackSubscriber weakBag = RWE \mSubscriber subscription ->
   for_ mSubscriber \subscriber -> do
     ticket <- WeakBag.insert subscriber weakBag
-    Ref.modify_
-      ( _ <> Active
-          { hint: SampleOnce
-          , unsubscribe: WeakBag.destroyTicket ticket
-          }
-      )
-      subscription
+    Ref.modify_ (_ <> WeakBag.destroyTicket ticket) subscription
 
 newtype Latch a = Latch
   { value :: Ref a
@@ -149,9 +113,9 @@ type Pipe a =
   }
 
 type PipeCache a =
-  { getValue :: Effect a
+  { value :: a
   , subscribers :: WeakBag SomeBehaviourSubscriber
-  , subscription :: BehaviourSubscription
+  , invalidator :: Invalidator
   }
 
 invalidateBehaviourSubscriber
@@ -181,10 +145,10 @@ readBehaviourUntracked (RWE b) = do
   w <- Ref.new mempty
   b Nothing w
 
-_time :: BuildM (BehaviourRep Milliseconds)
-_time = BM $ RE \env -> pure do
-  tellHint SampleContinuous
-  liftEffect $ env.getTime
+-- _time :: BuildM (BehaviourRep Milliseconds)
+-- _time = BM $ RE \env -> pure do
+--   tellHint SampleContinuous
+--   liftEffect $ env.getTime
 
 -------------------------------------------------------------------------------
 -- Inputs
@@ -221,7 +185,7 @@ newtype FireTriggers = FireTriggers
 -- Animations
 -------------------------------------------------------------------------------
 
-type AnimationInitialized =
+type Animation =
   { dispose :: Effect Unit
   , invalidate :: Effect Unit
   }
@@ -245,7 +209,7 @@ newtype SwitchCache a = SwitchCache
   { occurrence :: MaybeRef a
   , depth :: Ref Int
   , subscribers :: WeakBag (EventSubscriber a)
-  , subscription :: Ref BehaviourSubscription
+  , invalidator :: Ref Invalidator
   , currentParent :: Ref EventSubscription
   , parent :: BehaviourRep (EventRep a)
   }
