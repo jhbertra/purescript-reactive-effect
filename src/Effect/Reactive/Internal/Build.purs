@@ -22,19 +22,22 @@ import Effect.Reactive.Internal
   , BehaviourSubscription(..)
   , BuildM(..)
   , Clear(..)
+  , EventRep
   , FireParams
   , FireTriggers(..)
   , InvokeTrigger(..)
   , JoinReset(..)
   , Latch(..)
   , LatchUpdate(..)
+  , Perform(..)
   , PropagateEnv
   , PropagateM(..)
-  , Reaction(..)
-  , Reactor(..)
+  , RunPerform(..)
   , SwitchCache(..)
   , _subscribe
   , currentDepth
+  , groundEvent
+  , newGround
   , propagations
   , updateDepth
   , writeNowClearLater
@@ -52,10 +55,13 @@ initializeLatch :: forall m a. MonadBuild m => Latch a -> m Unit
 initializeLatch latch = liftBuild $ BM $ RE \env ->
   EQ.enqueue latch env.newLatches
 
-addReactor :: forall m a. MonadBuild m => Reactor a -> m Unit
-addReactor reactor = liftBuild $ BM $ RE \env -> do
-  void $ OB.insert (mkExists reactor) env.reactors
-  EQ.enqueue reactor env.newReactors
+addPerform :: forall m a. MonadBuild m => Perform a -> m Unit
+addPerform perform = liftBuild $ BM $ RE \env -> do
+  void $ OB.insert (mkExists perform) env.performs
+
+groundLater :: forall m a. MonadBuild m => EventRep a -> m Unit
+groundLater event = liftBuild $ BM $ RE \env -> do
+  EQ.enqueue (groundEvent event) env.groundQueue
 
 class MonadEffect m <= MonadBuild m where
   liftBuild :: BuildM ~> m
@@ -68,19 +74,21 @@ instance MonadBuild PropagateM where
     PM $ RE
       \{ triggerQueue
        , newLatches
-       , newReactors
-       , reactors
+       , performs
        , getTime
        , asap
+       , ground
+       , groundQueue
        } ->
         runReaderEffect
           m
           { triggerQueue
           , newLatches
-          , newReactors
-          , reactors
+          , performs
           , getTime
           , asap
+          , ground
+          , groundQueue
           }
 
 runBuildM
@@ -88,22 +96,32 @@ runBuildM
    . Queue FireParams
   -> Effect Milliseconds
   -> BuildM a
-  -> Effect { fire :: FireTriggers, result :: a }
+  -> Effect { fire :: FireTriggers, result :: a, dispose :: Effect Unit }
 runBuildM triggerQueue getTime (BM m) = do
   newLatches <- EQ.new
-  newReactors <- EQ.new
-  reactors <- OB.new
+  groundQueue <- EQ.new
+  performs <- OB.new
   asapIO <- newInputWithTriggerRef
+  { ground, dispose } <- newGround
   let asap = inputEvent asapIO.input
-  let env = { triggerQueue, newLatches, newReactors, reactors, getTime, asap }
+  let
+    env =
+      { triggerQueue, newLatches, performs, groundQueue, getTime, asap, ground }
   let
     fire@(FireTriggers fire') = FireTriggers \triggers read ->
       runReaderEffect (coerce $ fireAndRead triggers read) env
-  result <- runReaderEffect m env
+  result <- runReaderEffect
+    ( do
+        result <- m
+        let BM mGround = runFrame (pure unit)
+        mGround
+        pure result
+    )
+    env
   mAsapTrigger <- RM.read asapIO.trigger
   for_ mAsapTrigger \trigger ->
     fire' [ mkExists $ InvokeTrigger { trigger, value: unit } ] $ pure unit
-  pure { result, fire }
+  pure { result, fire, dispose }
 
 fireAndRead :: forall a. Array (Exists InvokeTrigger) -> Effect a -> BuildM a
 fireAndRead triggers read = runFrame do
@@ -127,7 +145,7 @@ runFrame :: forall a. PropagateM a -> BuildM a
 runFrame frame = BM $ RE \buildEnv -> do
   -- Declare frame variables
   clears <- EQ.new
-  reactions <- EQ.new
+  runPerforms <- EQ.new
   latchUpdates <- EQ.new
   switchesInvalidated <- EQ.new
   joinResets <- EQ.new
@@ -139,13 +157,14 @@ runFrame frame = BM $ RE \buildEnv -> do
     propagateEnv :: PropagateEnv
     propagateEnv =
       { triggerQueue: buildEnv.triggerQueue
-      , reactors: buildEnv.reactors
+      , performs: buildEnv.performs
       , newLatches: buildEnv.newLatches
-      , newReactors: buildEnv.newReactors
       , getTime: buildEnv.getTime
+      , ground: buildEnv.ground
+      , groundQueue: buildEnv.groundQueue
       , asap
       , clears
-      , reactions
+      , runPerforms
       , latchUpdates
       , joinResets
       , currentDepth: currentDepthRef
@@ -161,9 +180,9 @@ runFrame frame = BM $ RE \buildEnv -> do
     -- Initialize latches (assume there won't be any more propagations).
     liftEffect $ EQ.drain buildEnv.newLatches \(Latch { initialize }) ->
       unliftEffect u initialize
-    -- Initialize reactors (assume there won't be any more propagations).
-    liftEffect $ EQ.drain buildEnv.newReactors \(Reactor { initialize }) ->
-      unliftEffect u initialize
+    -- Run deferred grounds
+    liftEffect $ EQ.drain buildEnv.groundQueue \ground ->
+      void $ unliftEffect u ground
     pure result
   -- Clear allocated refs
   EQ.drain clears case _ of
@@ -201,16 +220,27 @@ runFrame frame = BM $ RE \buildEnv -> do
   EQ.drain joinResets \(JoinReset { cache, subscription }) -> do
     subscription.unsubscribe
     traverse_ (recalculateJoinDepth <<< force) cache
-  -- Run raised reactions
-  reactionsArray <- EQ.toArray reactions
-  orderedReactions <-
-    inOrder buildEnv.reactors
-      (runExists \(Reaction { reactor }) -> mkExists reactor)
-      reactionsArray
-  for_ orderedReactions $ runExists case _ of
-    Reaction { reactor: Reactor { connection }, value } -> do
-      mConnection <- RM.read connection
-      for_ mConnection \{ fire } -> fire value
+  -- Perform effects
+  runPerformsArray <- EQ.toArray runPerforms
+  orderedPerforms <-
+    inOrder buildEnv.performs
+      (runExists \(RunPerform { perform }) -> mkExists perform)
+      runPerformsArray
+  for_ orderedPerforms $ runExists case _ of
+    RunPerform
+      { perform: Perform { responseTriggerRef }
+      , register
+      , handleCancel
+      } -> do
+      cancel <- register \value -> do
+        mTrigger <- RM.read responseTriggerRef
+        for_ mTrigger \trigger -> do
+          let triggers = [ mkExists $ InvokeTrigger { trigger, value } ]
+          runReaderEffect
+            (let (BM m) = fireAndRead triggers $ pure unit in m)
+            buildEnv
+      handleCancel cancel
+
   -- fire ASAP
   mAsapTrigger <- RM.read asapIO.trigger
   for_ mAsapTrigger \trigger -> do

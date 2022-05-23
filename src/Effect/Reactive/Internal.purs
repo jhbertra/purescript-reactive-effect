@@ -6,7 +6,7 @@ import Concurrent.Queue (Queue)
 import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Fix (class MonadFix)
-import Control.Monad.Reader (class MonadAsk, class MonadReader)
+import Control.Monad.Reader (class MonadAsk, class MonadReader, asks, local)
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Unlift (class MonadUnlift)
 import Control.Monad.Writer (tell)
@@ -280,6 +280,23 @@ newtype JoinReset a = JoinReset
   , cache :: Maybe (DL.Lazy (JoinCache a))
   }
 
+newtype PerformParent a r = PerformParent
+  { setup :: Effect r
+  , teardown :: r -> Effect Unit
+  , event :: EventRep (r -> (a -> Effect Unit) -> Effect (Effect Unit))
+  }
+
+newtype Perform a = Perform
+  { parent :: Exists (PerformParent a)
+  , responseTriggerRef :: MaybeRef (InputTrigger a)
+  }
+
+newtype RunPerform a = RunPerform
+  { perform :: Perform a
+  , register :: (a -> Effect Unit) -> Effect (Effect Unit)
+  , handleCancel :: Effect Unit -> Effect Unit
+  }
+
 wrapSubscribeCached
   :: forall cache a m
    . MonadEffect m
@@ -301,28 +318,6 @@ zeroDepth :: Ref Int
 zeroDepth = unsafePerformEffect $ Ref.new 0
 
 -------------------------------------------------------------------------------
--- RaffFrame
--------------------------------------------------------------------------------
-
-type ReactionConnection a =
-  { dispose :: Effect Unit
-  , fire :: a -> Effect Unit
-  }
-
-type InitializeReaction a = Maybe a -> Effect (ReactionConnection a)
-
-newtype Reactor a = Reactor
-  { connection :: MaybeRef (ReactionConnection a)
-  , subscription :: MaybeRef EventSubscription
-  , initialize :: PropagateM Unit
-  }
-
-newtype Reaction a = Reaction
-  { reactor :: Reactor a
-  , value :: a
-  }
-
--------------------------------------------------------------------------------
 -- Builder
 -------------------------------------------------------------------------------
 
@@ -333,13 +328,39 @@ type FireParams =
   , onComplete :: Effect Unit
   }
 
+newtype Ground = Ground (forall a. (EventRep a) -> PropagateM Unit)
+
+newGround
+  :: Effect
+       { ground :: Ground
+       , dispose :: Effect Unit
+       , addDispose :: Effect Unit -> Effect Unit
+       }
+newGround = do
+  disposeRef <- Ref.new mempty
+  let addDispose dispose = Ref.modify_ (_ *> dispose) disposeRef
+  pure
+    { ground: Ground \event -> do
+        { subscription: { unsubscribe } } <- _subscribe event
+          $ terminalSubscriber
+          $ const
+          $ pure unit
+        liftEffect $ addDispose unsubscribe
+    , dispose: do
+        dispose <- Ref.read disposeRef
+        dispose
+        Ref.write mempty disposeRef
+    , addDispose
+    }
+
 type BuildEnv' r =
   { triggerQueue :: Queue FireParams
-  , reactors :: OrderedBag (Exists Reactor)
+  , performs :: OrderedBag (Exists Perform)
   , newLatches :: ExistentialQueue Latch
-  , newReactors :: ExistentialQueue Reactor
+  , groundQueue :: ExistentialQueue PropagateM
   , getTime :: Effect Milliseconds
   , asap :: EventRep Unit
+  , ground :: Ground
   | r
   }
 
@@ -376,7 +397,7 @@ type PropagateEnv = BuildEnv'
   ( clears :: ExistentialQueue Clear
   , currentDepth :: Ref Int
   , propagations :: PriorityQueue (PropagateM Unit)
-  , reactions :: ExistentialQueue Reaction
+  , runPerforms :: ExistentialQueue RunPerform
   , latchUpdates :: ExistentialQueue LatchUpdate
   , joinResets :: ExistentialQueue JoinReset
   )
@@ -424,8 +445,8 @@ resetJoin subscription cache = PM $ RE \env ->
 clearLater :: forall a. Clear a -> PropagateM Unit
 clearLater clear = PM $ RE \env -> EQ.enqueue clear env.clears
 
-raiseReaction :: forall a. Reaction a -> PropagateM Unit
-raiseReaction reaction = PM $ RE \env -> EQ.enqueue reaction env.reactions
+runPerform :: forall a. RunPerform a -> PropagateM Unit
+runPerform reaction = PM $ RE \env -> EQ.enqueue reaction env.runPerforms
 
 writeNowClearLater :: forall a. a -> MaybeRef a -> PropagateM Unit
 writeNowClearLater a ref = do
@@ -450,6 +471,11 @@ propagate depth evaluate =
 propagations :: PropagateM (PriorityQueue (PropagateM Unit))
 propagations = PM $ RE \env -> pure env.propagations
 
+groundEvent :: forall a. EventRep a -> PropagateM Unit
+groundEvent event = do
+  Ground ground <- asks _.ground
+  ground event
+
 -------------------------------------------------------------------------------
 -- Combinators - EventRep
 -------------------------------------------------------------------------------
@@ -468,11 +494,20 @@ getEventHandle event = do
 
 _pushRaw :: forall a b. (a -> PropagateM (Maybe b)) -> EventRep a -> EventRep b
 _pushRaw f e1 sub = do
+  { ground, dispose, addDispose } <- liftEffect newGround
+  let f' = local (_ { ground = ground }) <<< f
   result <- _subscribe e1 sub
-    { propagate = traverse_ sub.propagate <=< f
+    { propagate = \a -> do
+        mb <- f' a
+        traverse_ sub.propagate mb
     }
-  occurrence <- traverse f result.occurrence
-  pure result { occurrence = join occurrence }
+  liftEffect $ addDispose result.subscription.unsubscribe
+  occurrence <- traverse f' result.occurrence
+  pure
+    { occurrence: join occurrence
+    , subscription: result.subscription
+        { unsubscribe = dispose }
+    }
 
 _neverE :: forall a. EventRep a
 _neverE = const $ pure $

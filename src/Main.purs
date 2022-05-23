@@ -18,11 +18,11 @@ import Effect.Reactive
   , Raff
   , accumE
   , asap
-  , bracketReact
   , indexed_
   , intervalEvent
   , launchRaff_
   , liftSample2
+  , performWithSetup
   , stepper
   , (<&)
   )
@@ -43,22 +43,27 @@ main = launchAff_ $ launchRaff_ do
   let e2 = filter odd e
   let e3 = aligned e1 e2
   let e4 = aligned e1 e3
-  bseconds <- add one <$> stepper (-1.0) eseconds
+  _bseconds <- add one <$> stepper (-1.0) eseconds
   b <- stepper (-1) e
-  paragraph "e" e
-  paragraph "b <& e" $ b <& e
-  paragraph "b + e" $ liftSample2 (+) b e
-  paragraph "accumE (+) 0 e" =<< accumE (+) 0 e
-  paragraph "e1" e1
-  paragraph "e2" e2
-  paragraph "e3" e3
-  paragraph "e4" e4
+  ereturn <- paragraph "e" e
+  _ <- paragraph "b <& e" $ b <& e
+  _ <- paragraph "b + e" $ liftSample2 (+) b e
+  _ <- paragraph "accumE (+) 0 e" =<< accumE (+) 0 e
+  _ <- paragraph "e1" e1
+  _ <- paragraph "e2" e2
+  _ <- paragraph "e3" e3
+  _ <- paragraph "e4" e4
+  _ <- paragraph "ereturn" ereturn
   pure empty
   where
-  paragraph :: forall t a. Show a => String -> Event t a -> Raff t Unit
-  paragraph name e = void $ bracketReact e (mkElement "p") removeElement \p a ->
-    do
-      setTextContent (name <> ": " <> show a) (E.toNode p)
+  paragraph
+    :: forall t a. Show a => String -> Event t a -> Raff t (Event t String)
+  paragraph name = performWithSetup (mkElement "p") removeElement <<<
+    map
+      \a p ->
+        do
+          setTextContent (name <> ": " <> show a) (E.toNode p)
+          pure $ show a
   mkElement tag = do
     w <- window
     d <- document w

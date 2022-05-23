@@ -22,7 +22,7 @@ module Effect.Reactive
   , alignM
   , alignMaybe
   , alignMaybeM
-  , bracketReact
+  , asap
   , delayEvent
   , fanMap
   , filterApply
@@ -56,14 +56,16 @@ module Effect.Reactive
   , partitionApply
   , partitionMapApply
   , patcher
-  , asap
+  , perform
+  , performAsync
+  , performAsyncWithSetup
+  , performWithSetup
   , pull
   , pullContinuous
   , push
   , pushAlways
   , pushFlipped
   , pushed
-  , react
   , sample
   , sampleApply
   , sampleApplyMaybe
@@ -89,7 +91,6 @@ import Control.Alternative (class Plus)
 import Control.Apply (lift2)
 import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
-import Control.Monad.Error.Class (catchError, throwError)
 import Control.Monad.Fix (class MonadFix, mfix, mfix2)
 import Control.Monad.Reader (asks)
 import Control.Monad.Rec.Class (forever, untilJust)
@@ -100,7 +101,7 @@ import Data.Compactable (class Compactable, separate)
 import Data.Either (Either(..), either, hush)
 import Data.Exists (mkExists)
 import Data.Filterable (class Filterable, eitherBool, filterMap, maybeBool)
-import Data.Foldable (for_, traverse_)
+import Data.Foldable (for_)
 import Data.HeytingAlgebra (ff, implies, tt)
 import Data.Identity (Identity(..))
 import Data.Map (Map)
@@ -113,7 +114,7 @@ import Data.Tuple (Tuple(..), snd)
 import Data.Tuple.Nested ((/\))
 import Debug (class DebugWarning, traceM)
 import Effect (Effect)
-import Effect.Aff (Aff, delay, killFiber, launchAff, launchAff_)
+import Effect.Aff (Aff, bracket, delay, killFiber, launchAff, launchAff_)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (error)
 import Effect.RW (RWEffect(..), runRWEffect)
@@ -122,6 +123,7 @@ import Effect.Reactive.Internal
   , BuildM
   , EventRep
   , InvokeTrigger(..)
+  , PerformParent(..)
   , PropagateM
   , SampleHint(..)
   , _asap
@@ -142,8 +144,8 @@ import Effect.Reactive.Internal.Input
 import Effect.Reactive.Internal.Join (joinEvent)
 import Effect.Reactive.Internal.Latch (latchBehaviour, newLatch)
 import Effect.Reactive.Internal.Merge (_mergeWithMaybeM) as Internal
+import Effect.Reactive.Internal.Perform (_perform) as Internal
 import Effect.Reactive.Internal.Pipe (_pull)
-import Effect.Reactive.Internal.Reaction (_react)
 import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
 import Effect.Ref.Maybe as RM
@@ -192,22 +194,26 @@ launchRaff_ m = void $ launchRaff m
 launchRaff :: forall a. (forall t. Raff t (Event t a)) -> Aff a
 launchRaff (Raff m) = do
   queue <- Queue.new
-  { result, fire: FireTriggers fire } <-
-    liftEffect $ runBuildM queue (pure mempty) do
-      Event eResult <- m
-      runFrame do
-        eResultHandle <- getEventHandle eResult
-        liftEffect do
-          mResult <- RM.read eResultHandle.currentValue
-          pure $ eResultHandle /\ mResult
-  let eResultHandle /\ mResult = result
-  case mResult of
-    Just a -> pure a
-    Nothing -> untilJust do
-      { triggers, onComplete } <- Queue.read queue
-      liftEffect $ fire triggers do
-        onComplete
-        RM.read eResultHandle.currentValue
+  bracket
+    ( liftEffect $ runBuildM queue (pure mempty) do
+        Event eResult <- m
+        runFrame do
+          eResultHandle <- getEventHandle eResult
+          liftEffect do
+            mResult <- RM.read eResultHandle.currentValue
+            pure $ eResultHandle /\ mResult
+    )
+    (liftEffect <<< _.dispose)
+    ( \{ result, fire: FireTriggers fire } -> do
+        let eResultHandle /\ mResult = result
+        case mResult of
+          Just a -> pure a
+          Nothing -> untilJust do
+            { triggers, onComplete } <- Queue.read queue
+            liftEffect $ fire triggers do
+              onComplete
+              RM.read eResultHandle.currentValue
+    )
 
 -------------------------------------------------------------------------------
 -- RaffPush monad
@@ -404,29 +410,59 @@ pushed = push identity
 pushAlways :: forall t a b. (a -> RaffPush t b) -> Event t a -> Event t b
 pushAlways f = push $ map Just <<< f
 
-react
+performAsyncWithSetup
+  :: forall t m r a
+   . MonadRaff t m
+  => Effect r
+  -> (r -> Effect Unit)
+  -> Event t (r -> (a -> Effect Unit) -> Effect (Effect Unit))
+  -> m (Event t a)
+performAsyncWithSetup setup teardown (Event event) = liftRaff
+  $ Raff
+  $ coerce
+  $ Internal._perform (Internal.PerformParent { setup, teardown, event })
+
+performAsync
   :: forall t m a
    . MonadRaff t m
-  => Event t a
-  -> (a -> Effect Unit)
-  -> m (Effect Unit)
-react e = bracketReact e (pure unit) (const $ pure unit) <<< const
+  => Event t ((a -> Effect Unit) -> Effect (Effect Unit))
+  -> m (Event t a)
+performAsync (Event e) =
+  performAsyncWithSetup (pure unit) (\_ -> pure unit)
+    $ Event
+    $ Internal._pushRaw (pure <<< Just <<< const)
+    $ e
 
-bracketReact
-  :: forall t m a r
+perform
+  :: forall t m a
    . MonadRaff t m
-  => Event t a
-  -> Effect r
+  => Event t (Effect a)
+  -> m (Event t a)
+perform (Event event) = performAsync
+  $ Event
+  $ Internal._pushRaw
+      ( \effect -> pure $ Just \fire -> do
+          fire =<< effect
+          pure $ pure unit
+      )
+  $ event
+
+performWithSetup
+  :: forall t m r a
+   . MonadRaff t m
+  => Effect r
   -> (r -> Effect Unit)
-  -> (r -> a -> Effect Unit)
-  -> m (Effect Unit)
-bracketReact (Event e) acquire release fire =
-  liftRaff $ Raff $ _react e \ma -> do
-    r <- acquire
-    catchError (traverse_ (fire r) ma) \err -> do
-      release r
-      throwError err
-    pure { fire: fire r, dispose: release r }
+  -> Event t (r -> Effect a)
+  -> m (Event t a)
+performWithSetup setup teardown (Event event) =
+  performAsyncWithSetup setup teardown
+    $ Event
+    $ Internal._pushRaw
+        ( \effect -> pure $ Just \resource fire -> do
+            fire =<< effect resource
+            pure $ pure unit
+        )
+    $ event
 
 traceEvent :: forall t. DebugWarning => String -> Event t ~> Event t
 traceEvent msg = traceEventWith msg identity

@@ -24,7 +24,7 @@ import Data.Newtype (unwrap)
 import Data.String (toUpper)
 import Data.Tuple (fst)
 import Data.Tuple.Nested ((/\))
-import Effect.Reactive (react)
+import Effect.Reactive (perform)
 import Test.Data.Observe (class Observable, (=-=))
 import Test.Effect.Reactive.Dual
   ( Event(..)
@@ -91,8 +91,8 @@ reactiveSpec = describe "Effect.Reactive" do
     -- if you want to feed it into a join, otherwise its trigger won't fire
     -- before it is subscribed to
     _ <- R
-      (pure $ pure unit)
-      (react (case evalues of E _ r -> r) \_ -> pure unit)
+      (pure $ empty)
+      (perform $ case evalues of E _ r -> r $> pure unit)
     pure $ join $ liftSample2 const b eswitch
   matchesModel "append+filter" int \e ->
     let
