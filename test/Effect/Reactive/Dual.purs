@@ -17,10 +17,12 @@ import Data.Filterable
   , partition
   , partitionMap
   )
+import Data.Int (toNumber)
 import Data.Maybe (Maybe)
 import Effect.Aff (Aff)
 import Effect.Exception.Unsafe (unsafeThrow)
 import Effect.Reactive as R
+import Effect.Reactive.Internal (Time(..))
 import Test.Effect.Reactive.Model as M
 
 data Event (t :: R.Timeline) a = E (M.Event a) (R.Event t a)
@@ -295,6 +297,5 @@ liftSample2
 liftSample2 f (B mb b) (E me e) =
   E (M.liftSample2 f mb me) (R.liftSample2 f b e)
 
--- time :: forall t. Raff t (Behaviour t Milliseconds)
--- time =
---   R (pure $ liftBM $ Milliseconds <<< toNumber <$> M.timeB) $ liftBR <$> R.time
+timeB :: forall t. Behaviour t Time
+timeB = B (Time <<< toNumber <$> M.timeB) R.timeB

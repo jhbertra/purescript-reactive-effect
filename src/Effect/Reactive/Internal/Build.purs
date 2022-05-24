@@ -6,19 +6,17 @@ import Concurrent.Queue (Queue)
 import Data.Exists (Exists, mkExists, runExists)
 import Data.Foldable (for_, traverse_)
 import Data.Lazy (force)
-import Data.Maybe (Maybe(..))
 import Data.OrderedBag (inOrder)
 import Data.OrderedBag as OB
 import Data.Queue.Existential as EQ
 import Data.Queue.Priority as PQ
-import Data.Time.Duration (Milliseconds)
 import Data.Tuple (Tuple(..))
 import Data.WeakBag as WeakBag
 import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
-  ( BehaviourSubscriber(..)
+  ( BehaviourRep(..)
   , BuildM(..)
   , Clear(..)
   , EventRep
@@ -31,10 +29,13 @@ import Effect.Reactive.Internal
   , Perform(..)
   , PropagateEnv
   , PropagateM(..)
+  , PullSubscriber(..)
   , RunPerform(..)
   , SwitchCache(..)
+  , Time
   , _subscribe
   , currentDepth
+  , evalTimeFunc
   , groundEvent
   , newGround
   , propagations
@@ -75,6 +76,7 @@ instance MonadBuild PropagateM where
        , newLatches
        , performs
        , getTime
+       , time
        , asap
        , ground
        , groundQueue
@@ -85,6 +87,7 @@ instance MonadBuild PropagateM where
           , newLatches
           , performs
           , getTime
+          , time
           , asap
           , ground
           , groundQueue
@@ -93,7 +96,7 @@ instance MonadBuild PropagateM where
 runBuildM
   :: forall a
    . Queue FireParams
-  -> Effect Milliseconds
+  -> Effect Time
   -> BuildM a
   -> Effect { fire :: FireTriggers, result :: a, dispose :: Effect Unit }
 runBuildM triggerQueue getTime (BM m) = do
@@ -102,13 +105,23 @@ runBuildM triggerQueue getTime (BM m) = do
   performs <- OB.new
   asapIO <- newInputWithTriggerRef
   { ground, dispose } <- newGround
+  time <- getTime
   let asap = inputEvent asapIO.input
   let
     env =
-      { triggerQueue, newLatches, performs, groundQueue, getTime, asap, ground }
+      { triggerQueue
+      , newLatches
+      , performs
+      , groundQueue
+      , asap
+      , ground
+      , time
+      , getTime
+      }
   let
-    fire@(FireTriggers fire') = FireTriggers \triggers read ->
-      runReaderEffect (coerce $ fireAndRead triggers read) env
+    fire@(FireTriggers fire') = FireTriggers \triggers read -> do
+      time' <- getTime
+      runReaderEffect (coerce $ fireAndRead triggers read) env { time = time' }
   result <- runReaderEffect
     ( do
         result <- m
@@ -158,9 +171,10 @@ runFrame frame = BM $ RE \buildEnv -> do
       { triggerQueue: buildEnv.triggerQueue
       , performs: buildEnv.performs
       , newLatches: buildEnv.newLatches
-      , getTime: buildEnv.getTime
+      , time: buildEnv.time
       , ground: buildEnv.ground
       , groundQueue: buildEnv.groundQueue
+      , getTime: buildEnv.getTime
       , asap
       , clears
       , runPerforms
@@ -199,12 +213,15 @@ runFrame frame = BM $ RE \buildEnv -> do
     join $ Ref.read cache.invalidator
     oldParent.unsubscribe
     -- pull new parent
-    Tuple invalidator e <- runRWEffect cache.parent
-      $ Just
-      $ mkExists
-      $ SwitchSubscriber
-      $ pure
-      $ SwitchCache cache
+    let B tf = cache.parent
+    Tuple invalidator e <- runRWEffect (evalTimeFunc tf buildEnv.time)
+      $
+        { time: buildEnv.time
+        , subscriber: SwitchSubscriber
+            $ pure
+            $ mkExists
+            $ SwitchCache cache
+        }
     Ref.write invalidator cache.invalidator
     -- switch to new parent
     let subscriber = switchSubscriber $ pure $ SwitchCache cache

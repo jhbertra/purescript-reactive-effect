@@ -77,7 +77,7 @@ module Effect.Reactive
   , switcher
   , tag
   , tagMaybe
-  -- , time
+  , timeB
   , traceEvent
   , traceEventWith
   ) where
@@ -109,14 +109,14 @@ import Data.Patch (class Patch)
 import Data.These (These(..), these)
 import Data.Time.Duration (class Duration, fromDuration)
 import Data.Traversable (Accum)
-import Data.Tuple (Tuple(..), snd)
+import Data.Tuple (Tuple(..))
 import Data.Tuple.Nested ((/\))
 import Debug (class DebugWarning, traceM)
 import Effect (Effect)
 import Effect.Aff (Aff, bracket, delay, killFiber, launchAff, launchAff_)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (error)
-import Effect.RW (RWEffect(..), runRWEffect)
+import Effect.RW (RWEffect(..), evalRWEffect)
 import Effect.Reactive.Internal
   ( BehaviourRep
   , BuildM
@@ -124,12 +124,15 @@ import Effect.Reactive.Internal
   , InvokeTrigger(..)
   , PerformParent(..)
   , PropagateM
+  , PullM
+  , PullSubscriber(..)
   , _asap
   , _neverE
   , _pushRaw
-  -- , _time
+  , _sample
+  , _time
   ) as Internal
-import Effect.Reactive.Internal (FireTriggers(..), getEventHandle)
+import Effect.Reactive.Internal (FireTriggers(..), Time(..), getEventHandle)
 import Effect.Reactive.Internal.Build (liftBuild, runBuildM, runFrame)
 import Effect.Reactive.Internal.Cached (_cached) as Internal
 import Effect.Reactive.Internal.Fan (mapFanEvent)
@@ -188,11 +191,22 @@ instance MonadRaff t (RaffPush t) where
 launchRaff_ :: forall a. (forall t. Raff t (Event t a)) -> Aff Unit
 launchRaff_ m = void $ launchRaff m
 
+foreign import getHighResTimestamp :: Effect Time
+
 launchRaff :: forall a. (forall t. Raff t (Event t a)) -> Aff a
 launchRaff (Raff m) = do
   queue <- Queue.new
+  startTimeRef <- liftEffect $ RM.empty
+  let
+    getTime = do
+      mStartTime <- RM.read startTimeRef
+      case mStartTime of
+        Nothing -> pure $ Time zero
+        Just (Time startTime) -> do
+          (Time now) <- getHighResTimestamp
+          pure $ Time $ now - startTime
   bracket
-    ( liftEffect $ runBuildM queue (pure mempty) do
+    ( liftEffect $ runBuildM queue getTime do
         Event eResult <- m
         runFrame do
           eResultHandle <- getEventHandle eResult
@@ -203,6 +217,9 @@ launchRaff (Raff m) = do
     (liftEffect <<< _.dispose)
     ( \{ result, fire: FireTriggers fire } -> do
         let eResultHandle /\ mResult = result
+        liftEffect do
+          startTime <- getHighResTimestamp
+          RM.write startTime startTimeRef
         case mResult of
           Just a -> pure a
           Nothing -> untilJust do
@@ -233,7 +250,7 @@ derive newtype instance Monoid a => Monoid (RaffPush t a)
 -- RaffPull monad
 -------------------------------------------------------------------------------
 
-newtype RaffPull (t :: Timeline) a = RaffPull (Internal.BehaviourRep a)
+newtype RaffPull (t :: Timeline) a = RaffPull (Internal.PullM a)
 
 type role RaffPull nominal representational
 
@@ -250,10 +267,13 @@ class MonadFix m <= MonadPull t m | m -> t where
   liftPull :: RaffPull t ~> m
 
 instance MonadPull t (Raff t) where
-  liftPull (RaffPull m) = liftEffect $ snd <$> runRWEffect m Nothing
+  liftPull (RaffPull m) = Raff do
+    time <- asks _.time
+    liftEffect
+      $ evalRWEffect m { time, subscriber: Internal.AnonymousSubscriber }
 
 instance MonadPull t (RaffPush t) where
-  liftPull (RaffPull m) = RaffPush $ liftEffect $ snd <$> runRWEffect m Nothing
+  liftPull = liftRaff <<< liftPull
 
 instance MonadPull t (RaffPull t) where
   liftPull = coerce
@@ -647,18 +667,10 @@ newtype Behaviour (t :: Timeline) a = Behaviour (Internal.BehaviourRep a)
 
 type role Behaviour nominal representational
 
-instance Functor (Behaviour t) where
-  map f = pull <<< map f <<< sample
-
-instance Apply (Behaviour t) where
-  apply f a = pull $ sample f <*> sample a
-
-instance Applicative (Behaviour t) where
-  pure = Behaviour <<< pure
-
-instance Bind (Behaviour t) where
-  bind a f = pull $ sample a >>= sample <<< f
-
+derive newtype instance Functor (Behaviour t)
+derive newtype instance Apply (Behaviour t)
+derive newtype instance Applicative (Behaviour t)
+derive newtype instance Bind (Behaviour t)
 instance Monad (Behaviour t)
 derive newtype instance Lazy (Behaviour t a)
 
@@ -698,12 +710,10 @@ instance HeytingAlgebra a => HeytingAlgebra (Behaviour t a) where
 instance BooleanAlgebra a => BooleanAlgebra (Behaviour t a)
 
 pull :: forall t a. RaffPull t a -> Behaviour t a
-pull = coerce (_pull :: Internal.BehaviourRep a -> Internal.BehaviourRep a)
+pull = coerce (_pull :: Internal.PullM a -> Internal.BehaviourRep a)
 
--- time :: forall t m d. MonadRaff t m => Duration d => m (Behaviour t d)
--- time = do
---   b <- liftRaff $ Raff Internal._time
---   pure $ toDuration <$> Behaviour b
+timeB :: forall t. Behaviour t Time
+timeB = Behaviour $ Internal._time
 
 patcher
   :: forall patch t m a
@@ -728,7 +738,7 @@ switcher
 switcher i e = join <$> stepper i e
 
 sample :: forall t m a. MonadPull t m => Behaviour t a -> m a
-sample (Behaviour b) = liftPull $ RaffPull b
+sample (Behaviour b) = liftPull $ RaffPull $ Internal._sample b
 
 sampleApply :: forall t a b. Behaviour t (a -> b) -> Event t a -> Event t b
 sampleApply = liftSample2 identity

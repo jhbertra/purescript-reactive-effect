@@ -14,16 +14,19 @@ import Data.WeakBag as WeakBag
 import Effect.Class (liftEffect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
-  ( BehaviourSubscriber(..)
+  ( BehaviourRep(..)
   , CacheResult
   , Clear(..)
   , EventRep
   , EventSubscriber
   , PropagateM
+  , PullSubscriber(..)
   , Switch
   , SwitchCache(..)
   , _subscribe
+  , askTime
   , clearLater
+  , evalTimeFunc
   , wrapSubscribeCached
   , writeNowClearLater
   )
@@ -46,11 +49,11 @@ subscribeSwitchCache switch subscriber = do
     Just cache -> pure cache
     Nothing -> force <$> mfix \cache -> do
       subscribers <- liftEffect $ WeakBag.new $ cleanup switch.cache
+      time <- askTime
+      let B tf = switch.parent
       Tuple pullSubscription e <- liftEffect
-        $ runRWEffect switch.parent
-        $ Just
-        $ mkExists
-        $ SwitchSubscriber cache
+        $ runRWEffect (evalTimeFunc tf time)
+        $ { time, subscriber: SwitchSubscriber $ mkExists <$> cache }
       { subscription, occurrence } <- _subscribe e $ switchSubscriber cache
       occurrenceRef <- liftEffect $ RM.new occurrence
       when (isJust occurrence)

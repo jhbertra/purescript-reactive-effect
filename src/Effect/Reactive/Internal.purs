@@ -3,6 +3,7 @@ module Effect.Reactive.Internal where
 import Prelude
 
 import Concurrent.Queue (Queue)
+import Control.Apply (lift2)
 import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Fix (class MonadFix)
@@ -21,13 +22,12 @@ import Data.Queue.Existential (ExistentialQueue)
 import Data.Queue.Existential as EQ
 import Data.Queue.Priority (PriorityQueue)
 import Data.Queue.Priority as PQ
-import Data.Time.Duration (Milliseconds)
 import Data.Traversable (traverse)
 import Data.WeakBag (WeakBag, WeakBagTicket)
 import Data.WeakBag as WeakBag
 import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
-import Effect.RW (RWEffect(..))
+import Effect.RW (RWEffect(..), evalRWEffect)
 import Effect.Reader (ReaderEffect(..))
 import Effect.Ref (Ref)
 import Effect.Ref as Ref
@@ -36,6 +36,7 @@ import Effect.Ref.Maybe as RM
 import Effect.Unlift (class MonadUnliftEffect)
 import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
+import Test.Data.Observe (class Observable)
 
 -------------------------------------------------------------------------------
 -- Events
@@ -73,31 +74,114 @@ invalidDepth :: Int
 invalidDepth = -2
 
 -------------------------------------------------------------------------------
+-- Time
+-------------------------------------------------------------------------------
+
+newtype Time = Time Number
+
+derive instance Eq Time
+derive instance Ord Time
+instance Show Time where
+  show (Time t) = "(Time " <> show t <> ")"
+
+instance Observable Unit Time Time where
+  observe _ = identity
+
+-------------------------------------------------------------------------------
 -- Behaviours
 -------------------------------------------------------------------------------
 
-type BehaviourRep a = RWEffect BehaviourEnv Invalidator a
+type PullM a = RWEffect PullEnv PullCanceller a
 
-type BehaviourEnv = Maybe SomeBehaviourSubscriber
+type PullEnv =
+  { time :: Time
+  , subscriber :: PullSubscriber
+  }
 
-type Invalidator = Effect Unit
+newtype BehaviourRep a = B (TimeFunc (PullM a))
 
-data BehaviourSubscriber a
-  = PipeSubscriber (Pipe a)
-  | SwitchSubscriber (DL.Lazy (SwitchCache a))
+instance Functor BehaviourRep where
+  map f (B b) = B $ map (map f) b
+
+instance Apply BehaviourRep where
+  apply (B f) (B a) = B $ lift2 apply f a
+
+instance Applicative BehaviourRep where
+  pure = B <<< pure <<< pure
+
+instance Bind BehaviourRep where
+  bind (B tf) k = B $ F \t -> do
+    a <- evalTimeFunc tf t
+    let B tf' = k a
+    evalTimeFunc tf' t
+
+instance Monad BehaviourRep
+
+instance Semigroup a => Semigroup (BehaviourRep a) where
+  append = lift2 append
+
+instance Monoid a => Monoid (BehaviourRep a) where
+  mempty = pure mempty
+
+instance Lazy (BehaviourRep a) where
+  defer f = B $ L $ DL.defer $ coerce f
+
+data TimeFunc a
+  = K a
+  | F (Time -> a)
+  | L (DL.Lazy (TimeFunc a))
+
+instance Functor TimeFunc where
+  map f (K a) = K $ f a
+  map f (F g) = F $ f <<< g
+  map f (L a) = L $ map (map f) a
+
+instance Apply TimeFunc where
+  apply (K f) a = f <$> a
+  apply (L f) (K a) = L $ map (\f' -> f' a) <$> f
+  apply (L f) (L a) = L $ lift2 apply f a
+  apply (F f) (K a) = F \t -> f t a
+  apply f a = F \t -> evalTimeFunc f t $ evalTimeFunc a t
+
+instance Applicative TimeFunc where
+  pure = K
+
+instance Bind TimeFunc where
+  bind (K a) k = k a
+  bind (L a) k = L $ DL.defer \_ -> force a >>= k
+  bind (F f) k = F \t -> evalTimeFunc (k $ f t) t
+
+instance Monad TimeFunc
+
+instance Semigroup a => Semigroup (TimeFunc a) where
+  append = lift2 append
+
+instance Monoid a => Monoid (TimeFunc a) where
+  mempty = pure mempty
+
+evalTimeFunc :: forall a. TimeFunc a -> Time -> a
+evalTimeFunc (K a) _ = a
+evalTimeFunc (L f) t = evalTimeFunc (force f) t
+evalTimeFunc (F f) t = f t
+
+type PullCanceller = Effect Unit
+
+data PullSubscriber
+  = AnonymousSubscriber
+  | PipeSubscriber (Exists Pipe)
+  | SwitchSubscriber (DL.Lazy (Exists SwitchCache))
   | AnimationSubscriber Int (DL.Lazy Animation)
 
-type SomeBehaviourSubscriber = Exists BehaviourSubscriber
-
-trackSubscriber :: WeakBag SomeBehaviourSubscriber -> BehaviourRep Unit
-trackSubscriber weakBag = RWE \mSubscriber subscription ->
-  for_ mSubscriber \subscriber -> do
-    ticket <- WeakBag.insert subscriber weakBag
+trackSubscriber :: WeakBag PullSubscriber -> PullM Unit
+trackSubscriber weakBag = RWE \env subscription -> case env.subscriber of
+  AnonymousSubscriber -> pure unit
+  _ -> do
+    ticket <- WeakBag.insert env.subscriber weakBag
     Ref.modify_ (_ <> WeakBag.destroyTicket ticket) subscription
 
 newtype Latch a = Latch
   { value :: Ref a
-  , subscribers :: WeakBag SomeBehaviourSubscriber
+  , subscribers :: WeakBag PullSubscriber
   , initialize :: PropagateM Unit
   }
 
@@ -107,48 +191,50 @@ newtype LatchUpdate a = LatchUpdate
   , newValue :: a
   }
 
-type Pipe a =
+newtype Pipe a = Pipe
   { cache :: MaybeRef (PipeCache a)
-  , evaluate :: BehaviourRep a
+  , evaluate :: PullM a
   }
 
 type PipeCache a =
   { value :: a
-  , subscribers :: WeakBag SomeBehaviourSubscriber
-  , invalidator :: Invalidator
+  , subscribers :: WeakBag PullSubscriber
   }
 
 invalidateBehaviourSubscriber
-  :: forall a
-   . ExistentialQueue SwitchCache
-  -> BehaviourSubscriber a
+  :: ExistentialQueue SwitchCache
+  -> PullSubscriber
   -> Effect Unit
 invalidateBehaviourSubscriber switchesInvalidated = case _ of
-  PipeSubscriber pipe -> invalidatePipe switchesInvalidated pipe
-  SwitchSubscriber switch -> EQ.enqueue (force switch) switchesInvalidated
+  AnonymousSubscriber -> pure unit
+  PipeSubscriber pipe -> runExists (invalidatePipe switchesInvalidated) pipe
+  SwitchSubscriber lswitch ->
+    runExists (\switch -> EQ.enqueue switch switchesInvalidated) $ force lswitch
   AnimationSubscriber _ animation -> (force animation).invalidate
 
 invalidatePipe
   :: forall a. ExistentialQueue SwitchCache -> Pipe a -> Effect Unit
-invalidatePipe switchesInvalidated pipe = do
-  mCache <- RM.read pipe.cache
+invalidatePipe switchesInvalidated (Pipe { cache }) = do
+  mCache <- RM.read cache
   case mCache of
     Just { subscribers } -> do
-      RM.clear pipe.cache
+      RM.clear cache
       WeakBag.traverseMembers_
-        (runExists (invalidateBehaviourSubscriber switchesInvalidated))
+        (invalidateBehaviourSubscriber switchesInvalidated)
         subscribers
     _ -> pure unit
 
-readBehaviourUntracked :: BehaviourRep ~> Effect
-readBehaviourUntracked (RWE b) = do
-  w <- Ref.new mempty
-  b Nothing w
+readBehaviourUntracked :: forall a. BehaviourRep a -> Time -> Effect a
+readBehaviourUntracked (B tf) time =
+  evalRWEffect (evalTimeFunc tf time) { time, subscriber: AnonymousSubscriber }
 
--- _time :: BuildM (BehaviourRep Milliseconds)
--- _time = BM $ RE \env -> pure do
---   tellHint SampleContinuous
---   liftEffect $ env.getTime
+_time :: BehaviourRep Time
+_time = B $ F pure
+
+_sample :: forall a. BehaviourRep a -> PullM a
+_sample (B tf) = do
+  time <- asks _.time
+  evalTimeFunc tf time
 
 -------------------------------------------------------------------------------
 -- Inputs
@@ -209,7 +295,7 @@ newtype SwitchCache a = SwitchCache
   { occurrence :: MaybeRef a
   , depth :: Ref Int
   , subscribers :: WeakBag (EventSubscriber a)
-  , invalidator :: Ref Invalidator
+  , invalidator :: Ref PullCanceller
   , currentParent :: Ref EventSubscription
   , parent :: BehaviourRep (EventRep a)
   }
@@ -322,7 +408,8 @@ type BuildEnv' r =
   , performs :: OrderedBag (Exists Perform)
   , newLatches :: ExistentialQueue Latch
   , groundQueue :: ExistentialQueue PropagateM
-  , getTime :: Effect Milliseconds
+  , getTime :: Effect Time
+  , time :: Time
   , asap :: EventRep Unit
   , ground :: Ground
   | r
@@ -439,6 +526,9 @@ groundEvent :: forall a. EventRep a -> PropagateM Unit
 groundEvent event = do
   Ground ground <- asks _.ground
   ground event
+
+askTime :: PropagateM Time
+askTime = asks _.time
 
 -------------------------------------------------------------------------------
 -- Combinators - EventRep

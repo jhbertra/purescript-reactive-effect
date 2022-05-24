@@ -39,7 +39,7 @@ import Test.Effect.Reactive.Dual
   , liftSample2
   , stepper
   , switch
-  -- , time
+  , timeB
   )
 import Test.QuickCheck (class Arbitrary)
 import Test.QuickCheck.Extra (quickCheckImpure)
@@ -126,10 +126,8 @@ reactiveSpec = describe "Effect.Reactive" do
       let resultB = (_ /\ 0) <$> focusB
       pure $ liftSample2 const resultB inputE /\ resultB
     pure $ liftSample2 const resultB inputE
-
--- matchesModelM "time" unit' \e -> do
---   t <- time
---   pure $ liftSample2 const (unwrap <$> t) e
+  matchesModelM "time" unit' \e -> do
+    pure $ liftSample2 const timeB e
 
 matchesModel
   :: forall t o a b

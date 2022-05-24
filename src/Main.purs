@@ -24,6 +24,7 @@ import Effect.Reactive
   , liftSample2
   , performWithSetup
   , stepper
+  , timeB
   , (<&)
   )
 import Web.DOM.ChildNode (remove)
@@ -39,6 +40,8 @@ main :: Effect Unit
 main = launchAff_ $ launchRaff_ do
   e <- indexed_ =<< (lift2 (<|>) asap $ intervalEvent $ Seconds 1.0)
   eseconds <- indexed_ =<< (lift2 (<|>) asap $ intervalEvent $ Seconds 1.0)
+  e60fps <- lift2 (<|>) asap $ intervalEvent $ Seconds $ 1.0 / 60.0
+  let ms = timeB
   let e1 = filter (eq 0 <<< (_ `mod` 3)) e
   let e2 = filter odd e
   let e3 = aligned e1 e2
@@ -46,6 +49,8 @@ main = launchAff_ $ launchRaff_ do
   _bseconds <- add one <$> stepper (-1.0) eseconds
   b <- stepper (-1) e
   ereturn <- paragraph "e" e
+  _ <- paragraph "ms <& e60fps" $ ms <& e60fps
+  _ <- paragraph "ms <& eseconds" $ ms <& eseconds
   _ <- paragraph "b <& e" $ b <& e
   _ <- paragraph "b + e" $ liftSample2 (+) b e
   _ <- paragraph "accumE (+) 0 e" =<< accumE (+) 0 e

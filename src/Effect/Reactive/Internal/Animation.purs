@@ -3,29 +3,29 @@ module Effect.Reactive.Internal.Animation where
 import Prelude
 
 import Control.Monad.Fix (mfix)
-import Data.Exists (mkExists)
 import Data.Lazy (force)
-import Data.Maybe (Maybe(..))
 import Effect (Effect)
 import Effect.RW (evalRWEffect)
 import Effect.Reactive.Internal
   ( Animation
-  , BehaviourRep
-  , BehaviourSubscriber(..)
+  , BehaviourRep(..)
+  , BuildM(..)
+  , PullSubscriber(..)
+  , evalTimeFunc
   )
+import Effect.Reader (ReaderEffect(..))
 
 type Sampler = Effect
 
 type InitializeAnimation a = Sampler a -> Effect Animation
 
 animate
-  :: forall a. BehaviourRep a -> InitializeAnimation a -> Effect (Effect Unit)
-animate behaviour initialize = do
-  _.dispose <<< force <$> mfix \lanimation -> do
-    let
-      sampler = evalRWEffect behaviour
-        $ Just
-        $ mkExists
-        $ AnimationSubscriber 0 lanimation
-    animation <- initialize sampler
-    pure $ pure animation
+  :: forall a. BehaviourRep a -> InitializeAnimation a -> BuildM (Effect Unit)
+animate (B tf) initialize = BM $ RE \env -> do
+  _.dispose <<< force <$> mfix \animation -> do
+    pure <$> initialize do
+      time <- env.getTime
+      evalRWEffect (evalTimeFunc tf time) $
+        { time
+        , subscriber: AnimationSubscriber 0 animation
+        }
