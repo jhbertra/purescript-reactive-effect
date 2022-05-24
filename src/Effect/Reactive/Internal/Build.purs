@@ -75,7 +75,6 @@ instance MonadBuild PropagateM where
       \{ triggerQueue
        , newLatches
        , performs
-       , getTime
        , time
        , asap
        , ground
@@ -86,7 +85,6 @@ instance MonadBuild PropagateM where
           { triggerQueue
           , newLatches
           , performs
-          , getTime
           , time
           , asap
           , ground
@@ -96,16 +94,15 @@ instance MonadBuild PropagateM where
 runBuildM
   :: forall a
    . Queue FireParams
-  -> Effect Time
+  -> Time
   -> BuildM a
   -> Effect { fire :: FireTriggers, result :: a, dispose :: Effect Unit }
-runBuildM triggerQueue getTime (BM m) = do
+runBuildM triggerQueue time (BM m) = do
   newLatches <- EQ.new
   groundQueue <- EQ.new
   performs <- OB.new
   asapIO <- newInputWithTriggerRef
   { ground, dispose } <- newGround
-  time <- getTime
   let asap = inputEvent asapIO.input
   let
     env =
@@ -116,11 +113,10 @@ runBuildM triggerQueue getTime (BM m) = do
       , asap
       , ground
       , time
-      , getTime
       }
   let
-    fire@(FireTriggers fire') = FireTriggers \triggers read -> do
-      time' <- getTime
+    fire :: Time -> Array (Exists InvokeTrigger) -> Effect ~> Effect
+    fire time' triggers read = do
       runReaderEffect (coerce $ fireAndRead triggers read) env { time = time' }
   result <- runReaderEffect
     ( do
@@ -132,8 +128,8 @@ runBuildM triggerQueue getTime (BM m) = do
     env
   mAsapTrigger <- RM.read asapIO.trigger
   for_ mAsapTrigger \trigger ->
-    fire' [ mkExists $ InvokeTrigger { trigger, value: unit } ] $ pure unit
-  pure { result, fire, dispose }
+    fire time [ mkExists $ InvokeTrigger { trigger, value: unit } ] $ pure unit
+  pure { result, fire: FireTriggers fire, dispose }
 
 fireAndRead :: forall a. Array (Exists InvokeTrigger) -> Effect a -> BuildM a
 fireAndRead triggers read = runFrame do
@@ -174,7 +170,6 @@ runFrame frame = BM $ RE \buildEnv -> do
       , time: buildEnv.time
       , ground: buildEnv.ground
       , groundQueue: buildEnv.groundQueue
-      , getTime: buildEnv.getTime
       , asap
       , clears
       , runPerforms

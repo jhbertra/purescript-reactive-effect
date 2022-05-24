@@ -22,6 +22,8 @@ module Effect.Reactive
   , alignM
   , alignMaybe
   , alignMaybeM
+  , animate
+  , animateWithSetup
   , asap
   , delayEvent
   , fanMap
@@ -132,7 +134,16 @@ import Effect.Reactive.Internal
   , _sample
   , _time
   ) as Internal
-import Effect.Reactive.Internal (FireTriggers(..), Time(..), getEventHandle)
+import Effect.Reactive.Internal
+  ( FireTriggers(..)
+  , Ground(..)
+  , Time
+  , getEventHandle
+  , subTime
+  , zeroDepth
+  , zeroTime
+  )
+import Effect.Reactive.Internal.Animation (InitializeAnimation, newAnimation)
 import Effect.Reactive.Internal.Build (liftBuild, runBuildM, runFrame)
 import Effect.Reactive.Internal.Cached (_cached) as Internal
 import Effect.Reactive.Internal.Fan (mapFanEvent)
@@ -152,6 +163,8 @@ import Effect.Ref.Maybe as RM
 import Effect.Unlift (class MonadUnliftEffect)
 import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
+import Web.HTML (Window, window)
+import Web.HTML.Window (RequestAnimationFrameId, cancelAnimationFrame)
 
 -------------------------------------------------------------------------------
 -- Raff monad
@@ -196,17 +209,8 @@ foreign import getHighResTimestamp :: Effect Time
 launchRaff :: forall a. (forall t. Raff t (Event t a)) -> Aff a
 launchRaff (Raff m) = do
   queue <- Queue.new
-  startTimeRef <- liftEffect $ RM.empty
-  let
-    getTime = do
-      mStartTime <- RM.read startTimeRef
-      case mStartTime of
-        Nothing -> pure $ Time zero
-        Just (Time startTime) -> do
-          (Time now) <- getHighResTimestamp
-          pure $ Time $ now - startTime
   bracket
-    ( liftEffect $ runBuildM queue getTime do
+    ( liftEffect $ runBuildM queue zeroTime do
         Event eResult <- m
         runFrame do
           eResultHandle <- getEventHandle eResult
@@ -217,16 +221,16 @@ launchRaff (Raff m) = do
     (liftEffect <<< _.dispose)
     ( \{ result, fire: FireTriggers fire } -> do
         let eResultHandle /\ mResult = result
-        liftEffect do
-          startTime <- getHighResTimestamp
-          RM.write startTime startTimeRef
+        startTime <- liftEffect getHighResTimestamp
         case mResult of
           Just a -> pure a
           Nothing -> untilJust do
             { triggers, onComplete } <- Queue.read queue
-            liftEffect $ fire triggers do
-              onComplete
-              RM.read eResultHandle.currentValue
+            liftEffect do
+              now <- getHighResTimestamp
+              fire (now `subTime` startTime) triggers do
+                onComplete
+                RM.read eResultHandle.currentValue
     )
 
 -------------------------------------------------------------------------------
@@ -928,6 +932,67 @@ switch :: forall t a. Behaviour t (Event t a) -> Event t a
 switch (Behaviour parent) = unsafePerformEffect do
   cache <- RM.empty
   pure $ Event $ switchEvent { parent: coerce parent, cache }
+
+foreign import requestAnimationFrame
+  :: (Time -> Effect Unit) -> Window -> Effect RequestAnimationFrameId
+
+animate
+  :: forall t m a
+   . MonadRaff t m
+  => Behaviour t a
+  -> (a -> Effect Unit)
+  -> m Unit
+animate b handle =
+  animateWithSetup b (pure unit) (const $ pure unit) (const <<< handle)
+
+animateWithSetup
+  :: forall t m r a
+   . MonadRaff t m
+  => Behaviour t a
+  -> Effect r
+  -> (r -> Effect Unit)
+  -> (a -> r -> Effect Unit)
+  -> m Unit
+animateWithSetup (Behaviour b) setup teardown handle = liftRaff do
+  networkTime <- Raff $ asks _.time
+  Ground ground <- Raff $ asks _.ground
+  animation <- liftEffect do
+    globalTime <- getHighResTimestamp
+    let startTime = globalTime `subTime` networkTime
+    let
+      initialize :: InitializeAnimation a
+      initialize sampler = do
+        resource <- setup
+        requestIdRef <- RM.empty
+        w <- window
+        let
+          cancel = do
+            mRequestId <- RM.read requestIdRef
+            for_ mRequestId \requestId -> cancelAnimationFrame requestId w
+          invalidate = do
+            cancel
+            let
+              go time = do
+                Tuple poll a <- sampler $ time `subTime` startTime
+                handle a resource
+                if poll then do
+                  nextFrameId <- requestAnimationFrame go w
+                  RM.write nextFrameId requestIdRef
+                else
+                  RM.clear requestIdRef
+            go globalTime
+        invalidate
+        pure
+          { invalidate
+          , dispose: do
+              cancel
+              teardown resource
+          }
+    newAnimation b initialize
+  Raff $ runFrame $ ground \_ -> pure
+    { occurrence: Nothing
+    , subscription: { depth: zeroDepth, unsubscribe: animation.dispose }
+    }
 
 -------------------------------------------------------------------------------
 -- Testing

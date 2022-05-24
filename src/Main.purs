@@ -17,6 +17,7 @@ import Effect.Reactive
   ( Event
   , Raff
   , accumE
+  , animateWithSetup
   , asap
   , indexed_
   , intervalEvent
@@ -49,6 +50,8 @@ main = launchAff_ $ launchRaff_ do
   _bseconds <- add one <$> stepper (-1.0) eseconds
   b <- stepper (-1) e
   ereturn <- paragraph "e" e
+  animateWithSetup ms (mkElement "p") removeElement \a p ->
+    setTextContent ("animate ms: " <> show a) (E.toNode p)
   _ <- paragraph "ms <& e60fps" $ ms <& e60fps
   _ <- paragraph "ms <& eseconds" $ ms <& eseconds
   _ <- paragraph "b <& e" $ b <& e

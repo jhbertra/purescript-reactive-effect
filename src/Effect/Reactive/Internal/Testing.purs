@@ -8,7 +8,6 @@ import Data.Array as Array
 import Data.Compactable (compact)
 import Data.Exists (mkExists)
 import Data.FoldableWithIndex (forWithIndex_)
-import Data.Int (toNumber)
 import Data.Maybe (Maybe)
 import Data.These (theseLeft, theseRight)
 import Effect.Aff (Aff)
@@ -18,10 +17,11 @@ import Effect.Reactive.Internal
   , EventRep
   , FireTriggers(..)
   , InvokeTrigger(..)
-  , Time(..)
   , getEventHandle
+  , timeFromInt
+  , zeroTime
   )
-import Effect.Reactive.Internal.Build (fireAndRead, runBuildM, runFrame)
+import Effect.Reactive.Internal.Build (runBuildM, runFrame)
 import Effect.Reactive.Internal.Input (inputEvent, newInputWithTriggerRef)
 import Effect.Ref as Ref
 import Effect.Ref.Maybe as RM
@@ -42,19 +42,17 @@ interpret2
 interpret2 f as bs = do
   queue <- Queue.new
   liftEffect do
-    currentTime <- Ref.new $ Time 0.0
     result <- Ref.new []
     input1 <- newInputWithTriggerRef
     input2 <- newInputWithTriggerRef
     let ea = inputEvent input1.input
     let eb = inputEvent input2.input
-    r <- runBuildM queue (Ref.read currentTime) do
+    r <- runBuildM queue zeroTime do
       ec <- f ea eb
       runFrame $ getEventHandle ec
     let FireTriggers fire = r.fire
     let handle = r.result
     forWithIndex_ (aligned as bs) \time mab -> do
-      Ref.write (Time $ toNumber time) currentTime
       mTrigger1 <- RM.read input1.trigger
       mTrigger2 <- RM.read input2.trigger
       let
@@ -66,7 +64,8 @@ interpret2 f as bs = do
           trigger <- mTrigger2
           value <- join $ theseRight mab
           pure $ mkExists $ InvokeTrigger $ { trigger, value }
-      fire (compact [ mInvokeTrigger1, mInvokeTrigger2 ]) do
+        triggers = compact [ mInvokeTrigger1, mInvokeTrigger2 ]
+      fire (timeFromInt time) triggers do
         mc <- RM.read handle.currentValue
         Ref.modify_ (\cs -> Array.snoc cs mc) result
     r.dispose

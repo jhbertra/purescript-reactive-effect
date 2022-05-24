@@ -12,6 +12,7 @@ import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Unlift (class MonadUnlift)
 import Data.Exists (Exists, runExists)
 import Data.Foldable (for_, traverse_)
+import Data.Int (toNumber)
 import Data.Lazy (force)
 import Data.Lazy as DL
 import Data.Map (Map)
@@ -86,6 +87,18 @@ instance Show Time where
 
 instance Observable Unit Time Time where
   observe _ = identity
+
+subTime :: Time -> Time -> Time
+subTime (Time t0) (Time t1) = Time $ t0 - t1
+
+addTime :: Time -> Time -> Time
+addTime (Time t0) (Time t1) = Time $ t0 + t1
+
+zeroTime :: Time
+zeroTime = Time 0.0
+
+timeFromInt :: Int -> Time
+timeFromInt = Time <<< toNumber
 
 -------------------------------------------------------------------------------
 -- Behaviours
@@ -170,7 +183,7 @@ data PullSubscriber
   = AnonymousSubscriber
   | PipeSubscriber (Exists Pipe)
   | SwitchSubscriber (DL.Lazy (Exists SwitchCache))
-  | AnimationSubscriber Int (DL.Lazy Animation)
+  | AnimationSubscriber (DL.Lazy Animation)
 
 trackSubscriber :: WeakBag PullSubscriber -> PullM Unit
 trackSubscriber weakBag = RWE \env subscription -> case env.subscriber of
@@ -210,7 +223,7 @@ invalidateBehaviourSubscriber switchesInvalidated = case _ of
   PipeSubscriber pipe -> runExists (invalidatePipe switchesInvalidated) pipe
   SwitchSubscriber lswitch ->
     runExists (\switch -> EQ.enqueue switch switchesInvalidated) $ force lswitch
-  AnimationSubscriber _ animation -> (force animation).invalidate
+  AnimationSubscriber animation -> (force animation).invalidate
 
 invalidatePipe
   :: forall a. ExistentialQueue SwitchCache -> Pipe a -> Effect Unit
@@ -265,7 +278,7 @@ newtype InvokeTrigger a = InvokeTrigger
   }
 
 newtype FireTriggers = FireTriggers
-  (forall a. Array (Exists InvokeTrigger) -> Effect a -> Effect a)
+  (Time -> Array (Exists InvokeTrigger) -> Effect ~> Effect)
 
 -------------------------------------------------------------------------------
 -- Animations
@@ -408,7 +421,6 @@ type BuildEnv' r =
   , performs :: OrderedBag (Exists Perform)
   , newLatches :: ExistentialQueue Latch
   , groundQueue :: ExistentialQueue PropagateM
-  , getTime :: Effect Time
   , time :: Time
   , asap :: EventRep Unit
   , ground :: Ground
