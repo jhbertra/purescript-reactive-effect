@@ -16,8 +16,7 @@ import Effect (Effect)
 import Effect.Class (class MonadEffect, liftEffect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
-  ( BehaviourRep(..)
-  , BuildM(..)
+  ( BuildM(..)
   , Clear(..)
   , EventRep
   , FireParams
@@ -35,7 +34,6 @@ import Effect.Reactive.Internal
   , Time
   , _subscribe
   , currentDepth
-  , evalTimeFunc
   , groundEvent
   , newGround
   , propagations
@@ -208,8 +206,7 @@ runFrame frame = BM $ RE \buildEnv -> do
     join $ Ref.read cache.invalidator
     oldParent.unsubscribe
     -- pull new parent
-    let B tf = cache.parent
-    Tuple invalidator e <- runRWEffect (evalTimeFunc tf buildEnv.time)
+    Tuple { canceller } e <- runRWEffect cache.parent
       $
         { time: buildEnv.time
         , subscriber: SwitchSubscriber
@@ -217,7 +214,7 @@ runFrame frame = BM $ RE \buildEnv -> do
             $ mkExists
             $ SwitchCache cache
         }
-    Ref.write invalidator cache.invalidator
+    Ref.write canceller cache.invalidator
     -- switch to new parent
     let subscriber = switchSubscriber $ pure $ SwitchCache cache
     { subscription } <- runPropagateM propagateEnv $ _subscribe e $ subscriber

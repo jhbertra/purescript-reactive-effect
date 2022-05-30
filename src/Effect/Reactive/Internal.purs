@@ -3,7 +3,6 @@ module Effect.Reactive.Internal where
 import Prelude
 
 import Concurrent.Queue (Queue)
-import Control.Apply (lift2)
 import Control.Lazy (class Lazy)
 import Control.Monad.Base (class MonadBase)
 import Control.Monad.Fix (class MonadFix)
@@ -17,6 +16,7 @@ import Data.Lazy (force)
 import Data.Lazy as DL
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
+import Data.Monoid.Disj (Disj)
 import Data.Newtype (class Newtype)
 import Data.OrderedBag (OrderedBag)
 import Data.Queue.Existential (ExistentialQueue)
@@ -104,80 +104,21 @@ timeFromInt = Time <<< toNumber
 -- Behaviours
 -------------------------------------------------------------------------------
 
-type PullM a = RWEffect PullEnv PullCanceller a
+type PullM a = RWEffect PullEnv PullW a
 
 type PullEnv =
   { time :: Time
   , subscriber :: PullSubscriber
   }
 
-newtype BehaviourRep a = B (TimeFunc (PullM a))
-
-instance Functor BehaviourRep where
-  map f (B b) = B $ map (map f) b
-
-instance Apply BehaviourRep where
-  apply (B f) (B a) = B $ lift2 apply f a
-
-instance Applicative BehaviourRep where
-  pure = B <<< pure <<< pure
-
-instance Bind BehaviourRep where
-  bind (B tf) k = B $ F \t -> do
-    a <- evalTimeFunc tf t
-    let B tf' = k a
-    evalTimeFunc tf' t
-
-instance Monad BehaviourRep
-
-instance Semigroup a => Semigroup (BehaviourRep a) where
-  append = lift2 append
-
-instance Monoid a => Monoid (BehaviourRep a) where
-  mempty = pure mempty
-
-instance Lazy (BehaviourRep a) where
-  defer f = B $ L $ DL.defer $ coerce f
-
-data TimeFunc a
-  = K a
-  | F (Time -> a)
-  | L (DL.Lazy (TimeFunc a))
-
-instance Functor TimeFunc where
-  map f (K a) = K $ f a
-  map f (F g) = F $ f <<< g
-  map f (L a) = L $ map (map f) a
-
-instance Apply TimeFunc where
-  apply (K f) a = f <$> a
-  apply (L f) (K a) = L $ map (\f' -> f' a) <$> f
-  apply (L f) (L a) = L $ lift2 apply f a
-  apply (F f) (K a) = F \t -> f t a
-  apply f a = F \t -> evalTimeFunc f t $ evalTimeFunc a t
-
-instance Applicative TimeFunc where
-  pure = K
-
-instance Bind TimeFunc where
-  bind (K a) k = k a
-  bind (L a) k = L $ DL.defer \_ -> force a >>= k
-  bind (F f) k = F \t -> evalTimeFunc (k $ f t) t
-
-instance Monad TimeFunc
-
-instance Semigroup a => Semigroup (TimeFunc a) where
-  append = lift2 append
-
-instance Monoid a => Monoid (TimeFunc a) where
-  mempty = pure mempty
-
-evalTimeFunc :: forall a. TimeFunc a -> Time -> a
-evalTimeFunc (K a) _ = a
-evalTimeFunc (L f) t = evalTimeFunc (force f) t
-evalTimeFunc (F f) t = f t
-
 type PullCanceller = Effect Unit
+
+type PullW =
+  { canceller :: PullCanceller
+  , isContinuous :: Disj Boolean
+  }
+
+type BehaviourRep a = PullM a
 
 data PullSubscriber
   = AnonymousSubscriber
@@ -190,7 +131,9 @@ trackSubscriber weakBag = RWE \env subscription -> case env.subscriber of
   AnonymousSubscriber -> pure unit
   _ -> do
     ticket <- WeakBag.insert env.subscriber weakBag
-    Ref.modify_ (_ <> WeakBag.destroyTicket ticket) subscription
+    Ref.modify_
+      (_ <> { canceller: WeakBag.destroyTicket ticket, isContinuous: mempty })
+      subscription
 
 newtype Latch a = Latch
   { value :: Ref a
@@ -210,7 +153,7 @@ newtype Pipe a = Pipe
   }
 
 type PipeCache a =
-  { value :: a
+  { getValue :: PullM a
   , subscribers :: WeakBag PullSubscriber
   }
 
@@ -238,16 +181,14 @@ invalidatePipe switchesInvalidated (Pipe { cache }) = do
     _ -> pure unit
 
 readBehaviourUntracked :: forall a. BehaviourRep a -> Time -> Effect a
-readBehaviourUntracked (B tf) time =
-  evalRWEffect (evalTimeFunc tf time) { time, subscriber: AnonymousSubscriber }
+readBehaviourUntracked b time =
+  evalRWEffect b { time, subscriber: AnonymousSubscriber }
 
 _time :: BehaviourRep Time
-_time = B $ F pure
+_time = RWE \env _ -> pure env.time
 
 _sample :: forall a. BehaviourRep a -> PullM a
-_sample (B tf) = do
-  time <- asks _.time
-  evalTimeFunc tf time
+_sample = identity
 
 -------------------------------------------------------------------------------
 -- Inputs

@@ -8,11 +8,10 @@ import Data.Patch (class Patch, applyPatch)
 import Data.WeakBag as WeakBag
 import Effect.Class (liftEffect)
 import Effect.Reactive.Internal
-  ( BehaviourRep(..)
+  ( BehaviourRep
   , EventRep
   , Latch(..)
   , LatchUpdate(..)
-  , TimeFunc(..)
   , _subscribe
   , invalidateBehaviourSubscriber
   , terminalSubscriber
@@ -62,7 +61,7 @@ newLatch initialValue updateOn = do
       }
 
 latchBehaviour :: forall a. Latch a -> BehaviourRep a
-latchBehaviour (Latch latch) = B $ K do
+latchBehaviour (Latch latch) = do
   value <- liftEffect $ Ref.read latch.value
   trackSubscriber latch.subscribers
   pure value
