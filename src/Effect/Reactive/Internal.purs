@@ -213,13 +213,13 @@ type InputTrigger a =
   , occurrence :: MaybeRef a
   }
 
-newtype InvokeTrigger a = InvokeTrigger
+newtype TriggerInvocation a = TriggerInvocation
   { value :: a
   , trigger :: InputTrigger a
   }
 
 newtype FireTriggers = FireTriggers
-  (Time -> Array (Exists InvokeTrigger) -> Effect ~> Effect)
+  (Time -> Array (Exists TriggerInvocation) -> Effect ~> Effect)
 
 -------------------------------------------------------------------------------
 -- Animations
@@ -328,7 +328,7 @@ zeroDepth = unsafePerformEffect $ Ref.new 0
 newtype BuildM a = BM (ReaderEffect BuildEnv a)
 
 type FireParams =
-  { triggers :: Array (Exists InvokeTrigger)
+  { triggers :: Array (Exists TriggerInvocation)
   , onComplete :: Effect Unit
   }
 

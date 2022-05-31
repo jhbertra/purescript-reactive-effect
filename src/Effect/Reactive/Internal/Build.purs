@@ -21,7 +21,6 @@ import Effect.Reactive.Internal
   , EventRep
   , FireParams
   , FireTriggers(..)
-  , InvokeTrigger(..)
   , JoinReset(..)
   , Latch(..)
   , LatchUpdate(..)
@@ -32,6 +31,7 @@ import Effect.Reactive.Internal
   , RunPerform(..)
   , SwitchCache(..)
   , Time
+  , TriggerInvocation(..)
   , _subscribe
   , currentDepth
   , groundEvent
@@ -113,7 +113,7 @@ runBuildM triggerQueue time (BM m) = do
       , time
       }
   let
-    fire :: Time -> Array (Exists InvokeTrigger) -> Effect ~> Effect
+    fire :: Time -> Array (Exists TriggerInvocation) -> Effect ~> Effect
     fire time' triggers read = do
       runReaderEffect (coerce $ fireAndRead triggers read) env { time = time' }
   result <- runReaderEffect
@@ -126,14 +126,16 @@ runBuildM triggerQueue time (BM m) = do
     env
   mAsapTrigger <- RM.read asapIO.trigger
   for_ mAsapTrigger \trigger ->
-    fire time [ mkExists $ InvokeTrigger { trigger, value: unit } ] $ pure unit
+    fire time [ mkExists $ TriggerInvocation { trigger, value: unit } ] $ pure
+      unit
   pure { result, fire: FireTriggers fire, dispose }
 
-fireAndRead :: forall a. Array (Exists InvokeTrigger) -> Effect a -> BuildM a
+fireAndRead
+  :: forall a. Array (Exists TriggerInvocation) -> Effect a -> BuildM a
 fireAndRead triggers read = runFrame do
   u <- askUnliftEffect
   -- propagate inputs
-  for_ triggers $ runExists \(InvokeTrigger { trigger, value }) -> do
+  for_ triggers $ runExists \(TriggerInvocation { trigger, value }) -> do
     unlessM (liftEffect $ RM.isFilled trigger.occurrence) do
       writeNowClearLater value trigger.occurrence
       flip WeakBag.traverseMembers_ trigger.subscribers \subscriber ->
@@ -240,7 +242,7 @@ runFrame frame = BM $ RE \buildEnv -> do
       cancel <- register \value -> do
         mTrigger <- RM.read responseTriggerRef
         for_ mTrigger \trigger -> do
-          let triggers = [ mkExists $ InvokeTrigger { trigger, value } ]
+          let triggers = [ mkExists $ TriggerInvocation { trigger, value } ]
           runReaderEffect
             (let (BM m) = fireAndRead triggers $ pure unit in m)
             buildEnv
@@ -249,7 +251,7 @@ runFrame frame = BM $ RE \buildEnv -> do
   -- fire ASAP
   mAsapTrigger <- RM.read asapIO.trigger
   for_ mAsapTrigger \trigger -> do
-    let triggers = [ mkExists $ InvokeTrigger { trigger, value: unit } ]
+    let triggers = [ mkExists $ TriggerInvocation { trigger, value: unit } ]
     runReaderEffect
       (let (BM m) = fireAndRead triggers $ pure unit in m)
       buildEnv

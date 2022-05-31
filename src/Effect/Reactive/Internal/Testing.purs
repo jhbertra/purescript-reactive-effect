@@ -16,7 +16,7 @@ import Effect.Reactive.Internal
   ( BuildM
   , EventRep
   , FireTriggers(..)
-  , InvokeTrigger(..)
+  , TriggerInvocation(..)
   , getEventHandle
   , timeFromInt
   , zeroTime
@@ -59,11 +59,11 @@ interpret2 f as bs = do
         mInvokeTrigger1 = do
           trigger <- mTrigger1
           value <- join $ theseLeft mab
-          pure $ mkExists $ InvokeTrigger $ { trigger, value }
+          pure $ mkExists $ TriggerInvocation $ { trigger, value }
         mInvokeTrigger2 = do
           trigger <- mTrigger2
           value <- join $ theseRight mab
-          pure $ mkExists $ InvokeTrigger $ { trigger, value }
+          pure $ mkExists $ TriggerInvocation $ { trigger, value }
         triggers = compact [ mInvokeTrigger1, mInvokeTrigger2 ]
       fire (timeFromInt time) triggers do
         mc <- RM.read handle.currentValue
