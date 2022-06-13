@@ -2,84 +2,177 @@ module Main where
 
 import Prelude
 
-import Control.Alt ((<|>))
 import Control.Alternative (empty)
-import Control.Apply (lift2)
-import Data.Align (aligned)
-import Data.Filterable (filter)
-import Data.Int (odd)
+import Control.Monad.Fix (mfix)
+import Data.Int (round, toNumber)
 import Data.Maybe (Maybe(..))
-import Data.Time.Duration (Seconds(..))
 import Effect (Effect)
 import Effect.Aff (launchAff_)
+import Effect.Class (class MonadEffect, liftEffect)
 import Effect.Exception (throw)
 import Effect.Reactive
-  ( Event
+  ( class MonadRaff
+  , Behaviour
+  , Event
   , Raff
-  , accumE
+  , accumB
   , animateWithSetup
-  , asap
-  , indexed_
-  , intervalEvent
   , launchRaff_
-  , liftSample2
-  , performWithSetup
-  , stepper
+  , makeEvent
   , timeB
   , (<&)
   )
+import Effect.Reactive.Internal (Time(..), subTime, zeroTime)
+import Effect.Ref (Ref)
+import Effect.Ref as Ref
 import Web.DOM.ChildNode (remove)
 import Web.DOM.Document (createElement)
+import Web.DOM.Element (Element)
 import Web.DOM.Element as E
+import Web.DOM.Element as Element
 import Web.DOM.Node (appendChild, setTextContent)
+import Web.Event.Event (EventType)
+import Web.Event.Event as Web
+import Web.Event.EventTarget
+  ( EventTarget
+  , addEventListener
+  , eventListener
+  , removeEventListener
+  )
 import Web.HTML (window)
+import Web.HTML.Event.EventTypes (click)
 import Web.HTML.HTMLDocument (body, toDocument)
 import Web.HTML.HTMLElement as HE
 import Web.HTML.Window (document)
 
+-------------------------------------------------------------------------------
+-- The business logic
+-------------------------------------------------------------------------------
+
+type State = { startedAt :: Time, stoppedAt :: Maybe Time }
+
+toggleState :: State -> Time -> State
+toggleState { startedAt, stoppedAt: Nothing } now =
+  { startedAt, stoppedAt: Just now }
+toggleState _ now =
+  { startedAt: now, stoppedAt: Nothing }
+
+fmtTime :: Time -> String
+fmtTime (Time ms) = show (toNumber (round ms) / 1000.0) <> "s"
+
+renderTime :: Time -> State -> String
+renderTime now { startedAt, stoppedAt: Nothing } =
+  fmtTime (now `subTime` startedAt)
+renderTime _ { startedAt, stoppedAt: Just stoppedAt } =
+  fmtTime (stoppedAt `subTime` startedAt)
+
+renderButton :: State -> String
+renderButton { stoppedAt: Nothing } = "Stop"
+renderButton _ = "Start"
+
+-------------------------------------------------------------------------------
+-- The application
+-------------------------------------------------------------------------------
+
 main :: Effect Unit
-main = launchAff_ $ launchRaff_ do
-  e <- indexed_ =<< (lift2 (<|>) asap $ intervalEvent $ Seconds 1.0)
-  eseconds <- indexed_ =<< (lift2 (<|>) asap $ intervalEvent $ Seconds 1.0)
-  e60fps <- lift2 (<|>) asap $ intervalEvent $ Seconds $ 1.0 / 60.0
-  let ms = timeB
-  let e1 = filter (eq 0 <<< (_ `mod` 3)) e
-  let e2 = filter odd e
-  let e3 = aligned e1 e2
-  let e4 = aligned e1 e3
-  _bseconds <- add one <$> stepper (-1.0) eseconds
-  b <- stepper (-1) e
-  ereturn <- paragraph "e" e
-  animateWithSetup ms (mkElement "p") removeElement \a p ->
-    setTextContent ("animate ms: " <> show a) (E.toNode p)
-  _ <- paragraph "ms <& e60fps" $ ms <& e60fps
-  _ <- paragraph "ms <& eseconds" $ ms <& eseconds
-  _ <- paragraph "b <& e" $ b <& e
-  _ <- paragraph "b + e" $ liftSample2 (+) b e
-  _ <- paragraph "accumE (+) 0 e" =<< accumE (+) 0 e
-  _ <- paragraph "e1" e1
-  _ <- paragraph "e2" e2
-  _ <- paragraph "e3" e3
-  _ <- paragraph "e4" e4
-  _ <- paragraph "ereturn" ereturn
+main = launchAff_ $ launchRaff_ app
+
+app :: forall t a. Raff t (Event t a)
+app = do
+  let
+    initialState :: State
+    initialState = { startedAt: zeroTime, stoppedAt: Just zeroTime }
+
+  _ <- mfix \click -> do
+    let
+      timedClicks :: Event t Time
+      timedClicks = timeB <& click
+
+    bState :: Behaviour t State <- accumB toggleState initialState timedClicks
+
+    let
+      bDisplayed :: Behaviour t String
+      bDisplayed = renderTime <$> timeB <*> bState
+
+    paragraphB bDisplayed
+    _.click <$> button { text: renderButton <$> bState }
   pure empty
-  where
-  paragraph
-    :: forall t a. Show a => String -> Event t a -> Raff t (Event t String)
-  paragraph name = performWithSetup (mkElement "p") removeElement <<<
-    map
-      \a p ->
-        do
-          setTextContent (name <> ": " <> show a) (E.toNode p)
-          pure $ show a
-  mkElement tag = do
-    w <- window
-    d <- document w
-    mb <- body d
-    case mb of
-      Nothing -> throw "no body"
-      Just bd -> do
-        p <- createElement tag $ toDocument d
-        appendChild (E.toNode p) (HE.toNode bd)
-        pure p
-  removeElement = remove <<< E.toChildNode
+
+-------------------------------------------------------------------------------
+-- Some helpers
+-------------------------------------------------------------------------------
+
+fromEventListener
+  :: forall m t a
+   . MonadRaff t m
+  => EventType
+  -> EventTarget
+  -> (Web.Event -> a)
+  -> m (Event t a)
+fromEventListener etype target f = makeEvent \fire -> do
+  listener <- eventListener $ fire <<< f
+  addEventListener etype listener false target
+  pure do
+    removeEventListener etype listener false target
+
+type ButtonInputs t =
+  { text :: Behaviour t String
+  }
+
+type ButtonOutputs t =
+  { click :: Event t Unit
+  }
+
+button
+  :: forall t m
+   . MonadEffect m
+  => MonadRaff t m
+  => ButtonInputs t
+  -> m (ButtonOutputs t)
+button { text } = do
+  el <- liftEffect $ mkElement "button"
+  click <- fromEventListener click (Element.toEventTarget el) $ const unit
+  let
+    setup = do
+      appendElement el
+    teardown _ = do
+      removeElement el
+  animateWithSetup text setup teardown \text' _ -> do
+    setTextContent text' $ E.toNode el
+  pure { click }
+
+paragraphB
+  :: forall t. Behaviour t String -> Raff t Unit
+paragraphB b = animateWithSetup b (appendNewElement "p") removeElement \s p ->
+  setTextContent s $ E.toNode p
+
+mkElement :: String -> Effect Element
+mkElement tag = do
+  w <- window
+  d <- document w
+  createElement tag $ toDocument d
+
+appendElement :: Element -> Effect Unit
+appendElement el = do
+  w <- window
+  d <- document w
+  mb <- body d
+  case mb of
+    Nothing -> throw "no body"
+    Just bd -> do
+      appendChild (E.toNode el) (HE.toNode bd)
+
+appendNewElement :: String -> Effect Element
+appendNewElement tag = do
+  w <- window
+  d <- document w
+  mb <- body d
+  case mb of
+    Nothing -> throw "no body"
+    Just bd -> do
+      el <- createElement tag $ toDocument d
+      appendChild (E.toNode el) (HE.toNode bd)
+      pure el
+
+removeElement :: Element -> Effect Unit
+removeElement = remove <<< E.toChildNode

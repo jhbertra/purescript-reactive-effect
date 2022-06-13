@@ -16,7 +16,7 @@ import Data.Lazy (force)
 import Data.Lazy as DL
 import Data.Map (Map)
 import Data.Maybe (Maybe(..))
-import Data.Monoid.Disj (Disj)
+import Data.Monoid.Disj (Disj(..))
 import Data.Newtype (class Newtype)
 import Data.OrderedBag (OrderedBag)
 import Data.Queue.Existential (ExistentialQueue)
@@ -185,7 +185,9 @@ readBehaviourUntracked b time =
   evalRWEffect b { time, subscriber: AnonymousSubscriber }
 
 _time :: BehaviourRep Time
-_time = RWE \env _ -> pure env.time
+_time = RWE \env w -> do
+  Ref.modify_ _ { isContinuous = Disj true } w
+  pure env.time
 
 _sample :: forall a. BehaviourRep a -> PullM a
 _sample = identity

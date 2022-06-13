@@ -10,7 +10,7 @@ module Effect.Reactive
   , Timeline
   , (<&)
   , (<&>)
-  , (==>)
+  , (~>)
   , accumB
   , accumE
   , accumMB
@@ -44,16 +44,18 @@ module Effect.Reactive
   , liftSampleM2
   , liftSampleMaybe2
   , liftSampleMaybeM2
+  , makeBehaviour
   , makeEvent
   , makeEventAff
-  , mapAccumB
-  , mapAccumMB
+  , mapAccum
+  , mapAccumM
   , mapAccumM_
-  , mapAccumMaybeB
-  , mapAccumMaybeMB
+  , mapAccumMaybe
+  , mapAccumMaybeM
   , mapAccumMaybeM_
   , mapAccumMaybe_
   , mapAccum_
+  , newBehaviour
   , newEvent
   , partitionApply
   , partitionMapApply
@@ -160,7 +162,7 @@ import Effect.Reactive.Internal.Pipe (_pull)
 import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
 import Effect.Ref.Maybe as RM
-import Effect.Unlift (class MonadUnliftEffect)
+import Effect.Unlift (class MonadUnliftEffect, askUnliftEffect, unliftEffect)
 import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 import Web.HTML (Window, window)
@@ -310,9 +312,13 @@ newtype Event (t :: Timeline) a = Event (Internal.EventRep a)
 
 type role Event nominal representational
 
--- | A record that contains an event and a callback to fire it.
+-- | A record that contains an event and an action to fire it.
 type EventIO (t :: Timeline) a =
   { event :: Event t a, fire :: a -> Effect Unit }
+
+-- | A record that contains a behaviour and a action to update it.
+type BehaviourIO (t :: Timeline) a =
+  { behaviour :: Behaviour t a, update :: a -> Effect Unit }
 
 -- | A function that efficiently produces an `Event` when given some key `k`.
 newtype EventSelector t k v = EventSelector (k -> Event t v)
@@ -417,6 +423,61 @@ makeEvent
 makeEvent subscribe = makeEventWithFireCallback \fire ->
   subscribe \value -> fire value $ pure unit
 
+-- | Create a new event along with a trigger function that can be used to fire
+-- | the event imperatively.
+newEvent :: forall t m a. MonadRaff t m => m (EventIO t a)
+newEvent = liftRaff $ Raff do
+  { input, trigger } <- liftEffect newInputWithTriggerRef
+  triggerQueue <- asks _.triggerQueue
+  pure
+    { event: Event $ inputEvent input
+    , fire: \value -> do
+        mTrigger <- RM.read trigger
+        for_ mTrigger \t -> launchAff_ do
+          Queue.write
+            triggerQueue
+            { triggers:
+                [ mkExists $ Internal.TriggerInvocation { trigger: t, value } ]
+            , onComplete: (pure unit)
+            }
+    }
+
+-- | Make a behaviour from a setup action that receives an update action. The
+-- | resulting behaviour can be updated asynchronously by invoking the provided
+-- | update action.
+-- |
+-- | The action returned from the callback is used to free resources and
+-- | cancel effects acquired by the setup action.
+makeBehaviour
+  :: forall t m a
+   . MonadRaff t m
+  => a
+  -> ((a -> Effect Unit) -> Effect (Effect Unit))
+  -> m (Behaviour t a)
+makeBehaviour initialValue = stepper initialValue <=< makeEvent
+
+-- | Create a new behaviour along with an action that can be used to update
+-- | its value imperatively.
+newBehaviour :: forall t m a. MonadRaff t m => a -> m (BehaviourIO t a)
+newBehaviour initialValue = do
+  { event, fire } <- newEvent
+  behaviour <- stepper initialValue event
+  pure { behaviour, update: fire }
+
+-- | Make an event from a function that receives a trigger callback inside of
+-- | an `Aff` context.
+-- |
+-- | A canceller can be attached to the `Aff` context to free resources
+-- | acquired inside the callback.
+makeEventAff
+  :: forall t m a
+   . MonadRaff t m
+  => ((a -> Aff Unit) -> Aff Unit)
+  -> m (Event t a)
+makeEventAff f = makeEvent \fire -> do
+  fiber <- launchAff $ f $ liftEffect <<< fire
+  pure $ launchAff_ $ killFiber (error "killed") fiber
+
 -- | Make an event that fires after a given duration. Note that the timing may
 -- | not be precise in practice.
 delayEvent :: forall d t m. Duration d => MonadRaff t m => d -> m (Event t Unit)
@@ -444,39 +505,6 @@ intervalEvent d = makeEventAff \fire -> forever do
   delay $ fromDuration d
   fire unit
 
--- | Make an event from a function that receives a trigger callback inside of
--- | an `Aff` context.
--- |
--- | A canceller can be attached to the `Aff` context to free resources
--- | acquired inside the callback.
-makeEventAff
-  :: forall t m a
-   . MonadRaff t m
-  => ((a -> Aff Unit) -> Aff Unit)
-  -> m (Event t a)
-makeEventAff f = makeEvent \fire -> do
-  fiber <- launchAff $ f $ liftEffect <<< fire
-  pure $ launchAff_ $ killFiber (error "killed") fiber
-
--- | Create a new event along with a trigger function that can be used to fire
--- | the event imperatively.
-newEvent :: forall t m a. MonadRaff t m => m (EventIO t a)
-newEvent = liftRaff $ Raff do
-  { input, trigger } <- liftEffect newInputWithTriggerRef
-  triggerQueue <- asks _.triggerQueue
-  pure
-    { event: Event $ inputEvent input
-    , fire: \value -> do
-        mTrigger <- RM.read trigger
-        for_ mTrigger \t -> launchAff_ do
-          Queue.write
-            triggerQueue
-            { triggers:
-                [ mkExists $ Internal.TriggerInvocation { trigger: t, value } ]
-            , onComplete: (pure unit)
-            }
-    }
-
 -- | Create an event by reacting to another event. This general-purpose
 -- | combinator is extremely flexible, and can be used to create new events and
 -- | state accumulations in response to another event firing, and can also
@@ -489,7 +517,8 @@ pushFlipped
   :: forall t a b. Event t a -> (a -> RaffPush t (Maybe b)) -> Event t b
 pushFlipped = flip push
 
-infixl 1 pushFlipped as ==>
+infixl 1 push as <~
+infixl 1 pushFlipped as ~>
 
 -- | Collapses an `Event` of push actions into a regular `Event`. Alias for
 -- | `push identity`.
@@ -673,7 +702,7 @@ accumMaybeME
   -> m (Event t b)
 accumMaybeME f seed ea = mfix \eb -> do
   bb <- stepper seed eb
-  pure $ ea ==> \a -> do
+  pure $ ea ~> \a -> do
     b <- sample bb
     f b a
 
@@ -723,7 +752,7 @@ mapAccum_
   -> b
   -> Event t a
   -> m (Event t c)
-mapAccum_ f b e = _.value <$> mapAccumB f b e
+mapAccum_ f b e = _.value <$> mapAccum f b e
 
 -- | Effectfully accumulate state and emit event occurences at the same time.
 mapAccumM_
@@ -733,7 +762,7 @@ mapAccumM_
   -> b
   -> Event t a
   -> m (Event t c)
-mapAccumM_ f b e = _.value <$> mapAccumMB f b e
+mapAccumM_ f b e = _.value <$> mapAccumM f b e
 
 -- | Accumulate state and emit event occurences at the same time, allowing both
 -- | state updates and event firings to be skipped independently.
@@ -744,7 +773,7 @@ mapAccumMaybe_
   -> b
   -> Event t a
   -> m (Event t c)
-mapAccumMaybe_ f b e = _.value <$> mapAccumMaybeB f b e
+mapAccumMaybe_ f b e = _.value <$> mapAccumMaybe f b e
 
 -- | Effectfully accumulate state and emit event occurences at the same time,
 -- | allowing both state updates and event firings to be skipped independently.
@@ -755,7 +784,7 @@ mapAccumMaybeM_
   -> b
   -> Event t a
   -> m (Event t c)
-mapAccumMaybeM_ f b e = _.value <$> mapAccumMaybeMB f b e
+mapAccumMaybeM_ f b e = _.value <$> mapAccumMaybeM f b e
 
 -- | Collapse an `Event` of `Events` into a single event that fires whatever
 -- | the most recently fired `Event` fires, starting with an initial `Event`.
@@ -1050,61 +1079,61 @@ accumMaybeMB
   -> m (Behaviour t b)
 accumMaybeMB f seed ea = mfix \bb -> do
   let
-    eb = ea ==> \a -> do
+    eb = ea ~> \a -> do
       b <- sample bb
       f b a
   stepper seed eb
 
 -- | Efficiently accumulate state and fire events at the same time.
-mapAccumB
+mapAccum
   :: forall t m a b c
    . MonadRaff t m
   => (b -> a -> Accum b c)
   -> b
   -> Event t a
   -> m (Accum (Behaviour t b) (Event t c))
-mapAccumB f = mapAccumMaybeB \b a ->
+mapAccum f = mapAccumMaybe \b a ->
   let
     { accum, value } = f b a
   in
     { accum: Just accum, value: Just value }
 
 -- | Efficiently accumulate state and fire events effectfully at the same time.
-mapAccumMB
+mapAccumM
   :: forall t m a b c
    . MonadRaff t m
   => (b -> a -> RaffPush t (Accum b c))
   -> b
   -> Event t a
   -> m (Accum (Behaviour t b) (Event t c))
-mapAccumMB f = mapAccumMaybeMB \b a -> do
+mapAccumM f = mapAccumMaybeM \b a -> do
   { accum, value } <- f b a
   pure { accum: Just accum, value: Just value }
 
 -- | Efficiently accumulate state and fire events at the same time.
 -- | Both state updates and event firings can be independently skipped.
-mapAccumMaybeB
+mapAccumMaybe
   :: forall t m a b c
    . MonadRaff t m
   => (b -> a -> Accum (Maybe b) (Maybe c))
   -> b
   -> Event t a
   -> m (Accum (Behaviour t b) (Event t c))
-mapAccumMaybeB f = mapAccumMaybeMB \b a -> pure $ f b a
+mapAccumMaybe f = mapAccumMaybeM \b a -> pure $ f b a
 
 -- | Efficiently accumulate state and fire events effectfully at the same time.
 -- | Both state updates and event firings can be independently skipped.
-mapAccumMaybeMB
+mapAccumMaybeM
   :: forall t m a b c
    . MonadRaff t m
   => (b -> a -> RaffPush t (Accum (Maybe b) (Maybe c)))
   -> b
   -> Event t a
   -> m (Accum (Behaviour t b) (Event t c))
-mapAccumMaybeMB f seed ea = do
+mapAccumMaybeM f seed ea = do
   Tuple eaccum accum <- mfix2 \_ accum -> do
     let
-      eaccum = ea ==> \a -> do
+      eaccum = ea ~> \a -> do
         b <- sample accum
         result <- f b a
         pure case result of
@@ -1149,6 +1178,7 @@ animateWithSetup
 animateWithSetup (Behaviour b) setup teardown handle = liftRaff do
   networkTime <- Raff $ asks _.time
   Ground ground <- Raff $ asks _.ground
+  asapEvent <- asap
   animation <- liftEffect do
     globalTime <- getHighResTimestamp
     let startTime = globalTime `subTime` networkTime
@@ -1166,15 +1196,14 @@ animateWithSetup (Behaviour b) setup teardown handle = liftRaff do
             cancel
             let
               go time = do
-                Tuple poll a <- sampler $ time `subTime` startTime
+                Tuple isContinuous a <- sampler $ time `subTime` startTime
                 handle a resource
-                if poll then do
+                if isContinuous then do
                   nextFrameId <- requestAnimationFrame go w
                   RM.write nextFrameId requestIdRef
                 else
                   RM.clear requestIdRef
             go globalTime
-        invalidate
         pure
           { invalidate
           , dispose: do
@@ -1182,10 +1211,13 @@ animateWithSetup (Behaviour b) setup teardown handle = liftRaff do
               teardown resource
           }
     newAnimation b initialize
-  Raff $ runFrame $ ground \_ -> pure
-    { occurrence: Nothing
-    , subscription: { depth: zeroDepth, unsubscribe: animation.dispose }
-    }
+  u <- askUnliftEffect
+  void $ perform $ asapEvent $> do
+    animation.invalidate
+    unliftEffect u $ Raff $ runFrame $ ground \_ -> pure
+      { occurrence: Nothing
+      , subscription: { depth: zeroDepth, unsubscribe: animation.dispose }
+      }
 
 -------------------------------------------------------------------------------
 -- Testing
