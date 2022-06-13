@@ -19,6 +19,9 @@ spago install reactive-effect
 
 Module documentation is [published on Pursuit](http://pursuit.purescript.org/packages/purescript-reactive-effect).
 
+The `examples` directory contains some code samples that demonstrate how to use
+the library.
+
 ## Mini Tutorial
 
 More comprehensive documentation is in the works. For now, this mini-tutorial

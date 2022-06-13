@@ -1,4 +1,4 @@
-module Main where
+module Stopwatch where
 
 import Prelude
 
@@ -22,9 +22,7 @@ import Effect.Reactive
   , timeB
   , (<&)
   )
-import Effect.Reactive.Internal (Time(..), subTime, zeroTime)
-import Effect.Ref (Ref)
-import Effect.Ref as Ref
+import Effect.Reactive.Internal (Time(..), subTime)
 import Web.DOM.ChildNode (remove)
 import Web.DOM.Document (createElement)
 import Web.DOM.Element (Element)
@@ -49,26 +47,28 @@ import Web.HTML.Window (document)
 -- The business logic
 -------------------------------------------------------------------------------
 
-type State = { startedAt :: Time, stoppedAt :: Maybe Time }
+data State
+  = NotStarted
+  | Running Time
+  | Stopped Time Time
 
-toggleState :: State -> Time -> State
-toggleState { startedAt, stoppedAt: Nothing } now =
-  { startedAt, stoppedAt: Just now }
-toggleState _ now =
-  { startedAt: now, stoppedAt: Nothing }
+cycleState :: State -> Time -> State
+cycleState NotStarted now = Running now
+cycleState (Running startedAt) now = Stopped startedAt now
+cycleState _ _ = NotStarted
 
 fmtTime :: Time -> String
 fmtTime (Time ms) = show (toNumber (round ms) / 1000.0) <> "s"
 
 renderTime :: Time -> State -> String
-renderTime now { startedAt, stoppedAt: Nothing } =
-  fmtTime (now `subTime` startedAt)
-renderTime _ { startedAt, stoppedAt: Just stoppedAt } =
-  fmtTime (stoppedAt `subTime` startedAt)
+renderTime _ NotStarted = "0s"
+renderTime now (Running started) = fmtTime $ now `subTime` started
+renderTime _ (Stopped started stopped) = fmtTime $ stopped `subTime` started
 
 renderButton :: State -> String
-renderButton { stoppedAt: Nothing } = "Stop"
-renderButton _ = "Start"
+renderButton NotStarted = "Start"
+renderButton (Running _) = "Stop"
+renderButton _ = "Reset"
 
 -------------------------------------------------------------------------------
 -- The application
@@ -79,23 +79,23 @@ main = launchAff_ $ launchRaff_ app
 
 app :: forall t a. Raff t (Event t a)
 app = do
-  let
-    initialState :: State
-    initialState = { startedAt: zeroTime, stoppedAt: Just zeroTime }
-
+  -- mfix allows us to "forward declare" an event before it is defined.
+  -- `click` is an event that fires when the button is clicked.
   _ <- mfix \click -> do
-    let
-      timedClicks :: Event t Time
-      timedClicks = timeB <& click
-
-    bState :: Behaviour t State <- accumB toggleState initialState timedClicks
-
-    let
-      bDisplayed :: Behaviour t String
-      bDisplayed = renderTime <$> timeB <*> bState
-
-    paragraphB bDisplayed
-    _.click <$> button { text: renderButton <$> bState }
+    -- Tag the click events with the current time
+    let timedClicks = timeB <& click
+    -- Accumulate the stopwatch state by cycling through the 3 states every
+    -- time the button is clicked.
+    bState <- accumB cycleState NotStarted $ timedClicks
+    -- Render the state at the current time in a paragraph
+    paragraphB $ renderTime <$> timeB <*> bState
+    -- Render the button
+    buttonOut <- button { text: renderButton <$> bState }
+    -- Return the button's click event (will initialize the click event we
+    -- forward declared at the top of the `mfix` block.
+    pure buttonOut.click
+  -- Return an event that will terminate the application (this event never
+  -- fires).
   pure empty
 
 -------------------------------------------------------------------------------
