@@ -334,39 +334,14 @@ type FireParams =
   , onComplete :: Effect Unit
   }
 
-newtype Ground = Ground (forall a. (EventRep a) -> PropagateM Unit)
-
-newGround
-  :: Effect
-       { ground :: Ground
-       , dispose :: Effect Unit
-       , addDispose :: Effect Unit -> Effect Unit
-       }
-newGround = do
-  disposeRef <- Ref.new mempty
-  let addDispose dispose = Ref.modify_ (_ *> dispose) disposeRef
-  pure
-    { ground: Ground \event -> do
-        { subscription: { unsubscribe } } <- _subscribe event
-          $ terminalSubscriber
-          $ const
-          $ pure unit
-        liftEffect $ addDispose unsubscribe
-    , dispose: do
-        dispose <- Ref.read disposeRef
-        dispose
-        Ref.write mempty disposeRef
-    , addDispose
-    }
-
 type BuildEnv' r =
   { triggerQueue :: Queue FireParams
   , performs :: OrderedBag (Exists Perform)
   , newLatches :: ExistentialQueue Latch
-  , groundQueue :: ExistentialQueue PropagateM
   , time :: Time
   , asap :: EventRep Unit
-  , ground :: Ground
+  , setupQueue :: ExistentialQueue PropagateM
+  , cleanup :: Ref (Effect Unit)
   | r
   }
 
@@ -477,11 +452,6 @@ propagate depth evaluate =
 propagations :: PropagateM (PriorityQueue (PropagateM Unit))
 propagations = PM $ RE \env -> pure env.propagations
 
-groundEvent :: forall a. EventRep a -> PropagateM Unit
-groundEvent event = do
-  Ground ground <- asks _.ground
-  ground event
-
 askTime :: PropagateM Time
 askTime = asks _.time
 
@@ -503,19 +473,28 @@ getEventHandle event = do
 
 _pushRaw :: forall a b. (a -> PropagateM (Maybe b)) -> EventRep a -> EventRep b
 _pushRaw f e1 sub = do
-  { ground, dispose, addDispose } <- liftEffect newGround
-  let f' = local (_ { ground = ground }) <<< f
+  previousCleanup <- liftEffect $ Ref.new mempty
+  let
+    f' a = do
+      cleanupRef <- liftEffect do
+        join $ Ref.read previousCleanup
+        Ref.new mempty
+      mb <- local _ { cleanup = cleanupRef } $ f a
+      liftEffect do
+        cleanup <- Ref.read cleanupRef
+        Ref.write cleanup previousCleanup
+      pure mb
   result <- _subscribe e1 sub
-    { propagate = \a -> do
-        mb <- f' a
-        traverse_ sub.propagate mb
+    { propagate = traverse_ sub.propagate <=< f'
     }
-  liftEffect $ addDispose result.subscription.unsubscribe
   occurrence <- traverse f' result.occurrence
   pure
     { occurrence: join occurrence
     , subscription: result.subscription
-        { unsubscribe = dispose }
+        { unsubscribe = do
+            result.subscription.unsubscribe
+            join $ Ref.read previousCleanup
+        }
     }
 
 _neverE :: forall a. EventRep a

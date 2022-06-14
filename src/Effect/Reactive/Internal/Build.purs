@@ -18,7 +18,6 @@ import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal
   ( BuildM(..)
   , Clear(..)
-  , EventRep
   , FireParams
   , FireTriggers(..)
   , JoinReset(..)
@@ -34,8 +33,6 @@ import Effect.Reactive.Internal
   , TriggerInvocation(..)
   , _subscribe
   , currentDepth
-  , groundEvent
-  , newGround
   , propagations
   , updateDepth
   , writeNowClearLater
@@ -57,9 +54,13 @@ addPerform :: forall m a. MonadBuild m => Perform a -> m Unit
 addPerform perform = liftBuild $ BM $ RE \env -> do
   void $ OB.insert (mkExists perform) env.performs
 
-groundLater :: forall m a. MonadBuild m => EventRep a -> m Unit
-groundLater event = liftBuild $ BM $ RE \env -> do
-  EQ.enqueue (groundEvent event) env.groundQueue
+_onReady :: forall m. MonadBuild m => PropagateM Unit -> m Unit
+_onReady task = liftBuild $ BM $ RE \env -> do
+  EQ.enqueue task env.setupQueue
+
+_onCleanup :: forall m. MonadBuild m => Effect Unit -> m Unit
+_onCleanup task = liftBuild $ BM $ RE \env -> do
+  Ref.modify_ (_ *> task) env.cleanup
 
 class MonadEffect m <= MonadBuild m where
   liftBuild :: BuildM ~> m
@@ -75,8 +76,8 @@ instance MonadBuild PropagateM where
        , performs
        , time
        , asap
-       , ground
-       , groundQueue
+       , setupQueue
+       , cleanup
        } ->
         runReaderEffect
           m
@@ -85,8 +86,8 @@ instance MonadBuild PropagateM where
           , performs
           , time
           , asap
-          , ground
-          , groundQueue
+          , setupQueue
+          , cleanup
           }
 
 runBuildM
@@ -94,23 +95,23 @@ runBuildM
    . Queue FireParams
   -> Time
   -> BuildM a
-  -> Effect { fire :: FireTriggers, result :: a, dispose :: Effect Unit }
+  -> Effect { fire :: FireTriggers, result :: a, cleanup :: Effect Unit }
 runBuildM triggerQueue time (BM m) = do
   newLatches <- EQ.new
-  groundQueue <- EQ.new
+  setupQueue <- EQ.new
   performs <- OB.new
   asapIO <- newInputWithTriggerRef
-  { ground, dispose } <- newGround
+  cleanupRef <- Ref.new mempty
   let asap = inputEvent asapIO.input
   let
     env =
       { triggerQueue
       , newLatches
       , performs
-      , groundQueue
       , asap
-      , ground
       , time
+      , setupQueue
+      , cleanup: cleanupRef
       }
   let
     fire :: Time -> Array (Exists TriggerInvocation) -> Effect ~> Effect
@@ -119,7 +120,7 @@ runBuildM triggerQueue time (BM m) = do
   result <- runReaderEffect
     ( do
         result <- m
-        let BM mGround = runFrame (pure unit)
+        let BM mGround = runFrame $ pure unit
         mGround
         pure result
     )
@@ -128,7 +129,8 @@ runBuildM triggerQueue time (BM m) = do
   for_ mAsapTrigger \trigger ->
     fire time [ mkExists $ TriggerInvocation { trigger, value: unit } ] $ pure
       unit
-  pure { result, fire: FireTriggers fire, dispose }
+  cleanup <- Ref.read cleanupRef
+  pure { result, fire: FireTriggers fire, cleanup }
 
 fireAndRead
   :: forall a. Array (Exists TriggerInvocation) -> Effect a -> BuildM a
@@ -168,8 +170,8 @@ runFrame frame = BM $ RE \buildEnv -> do
       , performs: buildEnv.performs
       , newLatches: buildEnv.newLatches
       , time: buildEnv.time
-      , ground: buildEnv.ground
-      , groundQueue: buildEnv.groundQueue
+      , setupQueue: buildEnv.setupQueue
+      , cleanup: buildEnv.cleanup
       , asap
       , clears
       , runPerforms
@@ -188,9 +190,10 @@ runFrame frame = BM $ RE \buildEnv -> do
     -- Initialize latches (assume there won't be any more propagations).
     liftEffect $ EQ.drain buildEnv.newLatches \(Latch { initialize }) ->
       unliftEffect u initialize
-    -- Run deferred grounds
-    liftEffect $ EQ.drain buildEnv.groundQueue \ground ->
-      void $ unliftEffect u ground
+    -- After updating the latches, we can run the setup actions (which may
+    -- sample behaviours).
+    liftEffect $ EQ.drain buildEnv.setupQueue \task -> void
+      (unliftEffect u task)
     pure result
   -- Clear allocated refs
   EQ.drain clears case _ of

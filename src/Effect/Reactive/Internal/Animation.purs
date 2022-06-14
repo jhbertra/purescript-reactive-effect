@@ -7,7 +7,6 @@ import Data.Bifunctor (lmap)
 import Data.Lazy (force)
 import Data.Newtype (unwrap)
 import Data.Tuple (Tuple)
-import Debug (traceM)
 import Effect (Effect)
 import Effect.RW (runRWEffect)
 import Effect.Reactive.Internal

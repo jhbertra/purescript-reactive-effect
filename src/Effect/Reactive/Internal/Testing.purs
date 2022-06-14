@@ -68,5 +68,5 @@ interpret2 f as bs = do
       fire (timeFromInt time) triggers do
         mc <- RM.read handle.currentValue
         Ref.modify_ (\cs -> Array.snoc cs mc) result
-    r.dispose
+    r.cleanup
     Ref.read result

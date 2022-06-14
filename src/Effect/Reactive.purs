@@ -57,6 +57,8 @@ module Effect.Reactive
   , mapAccum_
   , newBehaviour
   , newEvent
+  , onReady
+  , onCleanup
   , partitionApply
   , partitionMapApply
   , patcher
@@ -138,15 +140,14 @@ import Effect.Reactive.Internal
   ) as Internal
 import Effect.Reactive.Internal
   ( FireTriggers(..)
-  , Ground(..)
   , Time
   , getEventHandle
   , subTime
-  , zeroDepth
   , zeroTime
   )
 import Effect.Reactive.Internal.Animation (InitializeAnimation, newAnimation)
 import Effect.Reactive.Internal.Build (liftBuild, runBuildM, runFrame)
+import Effect.Reactive.Internal.Build as Build
 import Effect.Reactive.Internal.Cached (_cached) as Internal
 import Effect.Reactive.Internal.Fan (mapFanEvent)
 import Effect.Reactive.Internal.Input
@@ -162,7 +163,7 @@ import Effect.Reactive.Internal.Pipe (_pull)
 import Effect.Reactive.Internal.Switch (switchEvent)
 import Effect.Reactive.Internal.Testing (interpret2) as Internal
 import Effect.Ref.Maybe as RM
-import Effect.Unlift (class MonadUnliftEffect, askUnliftEffect, unliftEffect)
+import Effect.Unlift (class MonadUnliftEffect)
 import Effect.Unsafe (unsafePerformEffect)
 import Safe.Coerce (coerce)
 import Web.HTML (Window, window)
@@ -230,7 +231,7 @@ launchRaff (Raff m) = do
             mResult <- RM.read eResultHandle.currentValue
             pure $ eResultHandle /\ mResult
     )
-    (liftEffect <<< _.dispose)
+    (liftEffect <<< _.cleanup)
     ( \{ result, fire: FireTriggers fire } -> do
         let eResultHandle /\ mResult = result
         startTime <- liftEffect getHighResTimestamp
@@ -244,6 +245,12 @@ launchRaff (Raff m) = do
                 onComplete
                 RM.read eResultHandle.currentValue
     )
+
+onReady :: forall t m. MonadRaff t m => RaffPush t Unit -> m Unit
+onReady (RaffPush task) = liftRaff $ Raff $ Build._onReady task
+
+onCleanup :: forall t m. MonadRaff t m => Effect Unit -> m Unit
+onCleanup = liftRaff <<< Raff <<< Build._onCleanup
 
 -------------------------------------------------------------------------------
 -- RaffPush monad
@@ -261,6 +268,14 @@ derive newtype instance Apply (RaffPush t)
 derive newtype instance Applicative (RaffPush t)
 derive newtype instance Bind (RaffPush t)
 derive newtype instance Monad (RaffPush t)
+derive newtype instance MonadEffect (RaffPush t)
+derive newtype instance MonadUnliftEffect (RaffPush t)
+instance MonadBase (RaffPush t) (RaffPush t) where
+  liftBase = identity
+
+instance MonadUnlift (RaffPush t) (RaffPush t) where
+  withRunInBase runAction = runAction identity
+
 derive newtype instance MonadFix (RaffPush t)
 derive newtype instance Semigroup a => Semigroup (RaffPush t a)
 derive newtype instance Monoid a => Monoid (RaffPush t a)
@@ -1177,8 +1192,6 @@ animateWithSetup
   -> m Unit
 animateWithSetup (Behaviour b) setup teardown handle = liftRaff do
   networkTime <- Raff $ asks _.time
-  Ground ground <- Raff $ asks _.ground
-  asapEvent <- asap
   animation <- liftEffect do
     globalTime <- getHighResTimestamp
     let startTime = globalTime `subTime` networkTime
@@ -1211,13 +1224,9 @@ animateWithSetup (Behaviour b) setup teardown handle = liftRaff do
               teardown resource
           }
     newAnimation b initialize
-  u <- askUnliftEffect
-  void $ perform $ asapEvent $> do
-    animation.invalidate
-    unliftEffect u $ Raff $ runFrame $ ground \_ -> pure
-      { occurrence: Nothing
-      , subscription: { depth: zeroDepth, unsubscribe: animation.dispose }
-      }
+  onReady do
+    liftEffect animation.invalidate
+    onCleanup animation.dispose
 
 -------------------------------------------------------------------------------
 -- Testing
