@@ -24,7 +24,6 @@ module Effect.Reactive
   , alignMaybeM
   , animate
   , animateWithSetup
-  , asap
   , delayEvent
   , fanMap
   , filterApply
@@ -132,7 +131,6 @@ import Effect.Reactive.Internal
   , PullM
   , PullSubscriber(..)
   , TriggerInvocation(..)
-  , _asap
   , _neverE
   , _pushRaw
   , _sample
@@ -394,11 +392,6 @@ instance Semigroup a => Monoid (Event t a) where
   mempty = empty
 
 derive newtype instance Lazy (Event t a)
-
--- | An event that will fire as soon as its surrounding scope is finished
--- | building.
-asap :: forall t. Raff t (Event t Unit)
-asap = coerce Internal._asap
 
 -- | Make an event from a function that receives a trigger callback. In
 -- | addition to the value to be fired, the callback also allows an action to

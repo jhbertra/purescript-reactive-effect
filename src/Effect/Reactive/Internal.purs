@@ -339,7 +339,6 @@ type BuildEnv' r =
   , performs :: OrderedBag (Exists Perform)
   , newLatches :: ExistentialQueue Latch
   , time :: Time
-  , asap :: EventRep Unit
   , setupQueue :: ExistentialQueue PropagateM
   , cleanup :: Ref (Effect Unit)
   | r
@@ -502,9 +501,6 @@ _neverE = const $ pure $
   { occurrence: Nothing
   , subscription: { depth: zeroDepth, unsubscribe: mempty }
   }
-
-_asap :: BuildM (EventRep Unit)
-_asap = BM $ RE \env -> pure env.asap
 
 -------------------------------------------------------------------------------
 -- Helpers

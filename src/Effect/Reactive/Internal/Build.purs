@@ -37,7 +37,6 @@ import Effect.Reactive.Internal
   , updateDepth
   , writeNowClearLater
   )
-import Effect.Reactive.Internal.Input (inputEvent, newInputWithTriggerRef)
 import Effect.Reactive.Internal.Join (recalculateJoinDepth)
 import Effect.Reactive.Internal.Switch (switchSubscriber)
 import Effect.Reader (ReaderEffect(..), runReaderEffect)
@@ -75,7 +74,6 @@ instance MonadBuild PropagateM where
        , newLatches
        , performs
        , time
-       , asap
        , setupQueue
        , cleanup
        } ->
@@ -85,7 +83,6 @@ instance MonadBuild PropagateM where
           , newLatches
           , performs
           , time
-          , asap
           , setupQueue
           , cleanup
           }
@@ -100,15 +97,12 @@ runBuildM triggerQueue time (BM m) = do
   newLatches <- EQ.new
   setupQueue <- EQ.new
   performs <- OB.new
-  asapIO <- newInputWithTriggerRef
   cleanupRef <- Ref.new mempty
-  let asap = inputEvent asapIO.input
   let
     env =
       { triggerQueue
       , newLatches
       , performs
-      , asap
       , time
       , setupQueue
       , cleanup: cleanupRef
@@ -125,10 +119,6 @@ runBuildM triggerQueue time (BM m) = do
         pure result
     )
     env
-  mAsapTrigger <- RM.read asapIO.trigger
-  for_ mAsapTrigger \trigger ->
-    fire time [ mkExists $ TriggerInvocation { trigger, value: unit } ] $ pure
-      unit
   cleanup <- Ref.read cleanupRef
   pure { result, fire: FireTriggers fire, cleanup }
 
@@ -161,8 +151,6 @@ runFrame frame = BM $ RE \buildEnv -> do
   joinResets <- EQ.new
   currentDepthRef <- Ref.new $ -1
   propagationsQ <- PQ.new
-  asapIO <- newInputWithTriggerRef
-  let asap = inputEvent asapIO.input
   let
     propagateEnv :: PropagateEnv
     propagateEnv =
@@ -172,7 +160,6 @@ runFrame frame = BM $ RE \buildEnv -> do
       , time: buildEnv.time
       , setupQueue: buildEnv.setupQueue
       , cleanup: buildEnv.cleanup
-      , asap
       , clears
       , runPerforms
       , latchUpdates
@@ -250,14 +237,6 @@ runFrame frame = BM $ RE \buildEnv -> do
             (let (BM m) = fireAndRead triggers $ pure unit in m)
             buildEnv
       handleCancel cancel
-
-  -- fire ASAP
-  mAsapTrigger <- RM.read asapIO.trigger
-  for_ mAsapTrigger \trigger -> do
-    let triggers = [ mkExists $ TriggerInvocation { trigger, value: unit } ]
-    runReaderEffect
-      (let (BM m) = fireAndRead triggers $ pure unit in m)
-      buildEnv
   pure result
 
 runPropagateM :: forall a. PropagateEnv -> PropagateM a -> Effect a
