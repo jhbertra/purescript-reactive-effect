@@ -1,6 +1,7 @@
 module Data.Patch
   ( class Patch
-  , PatchMap
+  , PatchMap(..)
+  , PatchOp(..)
   , applyPatch
   , applyPatchAlways
   , copy
@@ -17,10 +18,11 @@ import Control.Alternative (guard)
 import Data.Bifunctor (class Bifunctor)
 import Data.Generic.Rep (class Generic)
 import Data.Identity (Identity(..))
-import Data.Map (Map)
+import Data.Map (Map, SemigroupMap(..))
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Show.Generic (genericShow)
+import Safe.Coerce (coerce)
 import Type.Proxy (Proxy(..))
 
 class Patch patch a | a -> patch where
@@ -63,6 +65,17 @@ instance Bifunctor (PatchOp k) where
     Insert v -> Insert $ f v
     Delete -> Delete
     Move k p -> Move k $ g p
+
+instance Semigroup p => Semigroup (PatchOp k v p) where
+  append _ b = b
+
+instance (Ord k, Semigroup p) => Semigroup (PatchMap k v p) where
+  append = coerce
+    ( append
+        :: SemigroupMap k (PatchOp k v p)
+        -> SemigroupMap k (PatchOp k v p)
+        -> SemigroupMap k (PatchOp k v p)
+    )
 
 instance (Show k, Show v, Show p) => Show (PatchOp k v p) where
   show = genericShow

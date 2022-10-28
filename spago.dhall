@@ -5,6 +5,7 @@
   [ "aff"
   , "arrays"
   , "bifunctors"
+  , "canvas"
   , "concurrent-queues"
   , "control"
   , "datetime"
@@ -49,6 +50,7 @@
   , "web-dom"
   , "web-events"
   , "web-html"
+  , "web-uievents"
   ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs", "examples/**/*.purs" ]

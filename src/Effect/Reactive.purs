@@ -2,7 +2,9 @@ module Effect.Reactive
   ( class MonadPull
   , class MonadRaff
   , Behaviour
+  , BehaviourIO
   , Event
+  , EventIO
   , EventSelector
   , Raff
   , RaffPull
@@ -46,6 +48,7 @@ module Effect.Reactive
   , makeBehaviour
   , makeEvent
   , makeEventAff
+  , makeEventWithFireCallback
   , mapAccum
   , mapAccumM
   , mapAccumM_
@@ -56,8 +59,7 @@ module Effect.Reactive
   , mapAccum_
   , newBehaviour
   , newEvent
-  , onReady
-  , onCleanup
+  , runSetup
   , partitionApply
   , partitionMapApply
   , patcher
@@ -138,6 +140,7 @@ import Effect.Reactive.Internal
   ) as Internal
 import Effect.Reactive.Internal
   ( FireTriggers(..)
+  , PropagateM(..)
   , Time
   , getEventHandle
   , subTime
@@ -244,11 +247,11 @@ launchRaff (Raff m) = do
                 RM.read eResultHandle.currentValue
     )
 
-onReady :: forall t m. MonadRaff t m => RaffPush t Unit -> m Unit
-onReady (RaffPush task) = liftRaff $ Raff $ Build._onReady task
-
-onCleanup :: forall t m. MonadRaff t m => Effect Unit -> m Unit
-onCleanup = liftRaff <<< Raff <<< Build._onCleanup
+-- | Run an imperative effect when the network is setup, returning a cleanup
+-- | action (for e.g. unsubscribing from streaming sources).
+runSetup :: forall t m. MonadRaff t m => Effect (Effect Unit) -> m Unit
+runSetup = liftRaff <<< Raff <<< Build._onReady <<<
+  (Build._onCleanup <=< liftEffect)
 
 -------------------------------------------------------------------------------
 -- RaffPush monad
@@ -1217,9 +1220,9 @@ animateWithSetup (Behaviour b) setup teardown handle = liftRaff do
               teardown resource
           }
     newAnimation b initialize
-  onReady do
-    liftEffect animation.invalidate
-    onCleanup animation.dispose
+  runSetup do
+    animation.invalidate
+    pure animation.dispose
 
 -------------------------------------------------------------------------------
 -- Testing
