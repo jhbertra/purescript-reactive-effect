@@ -59,7 +59,7 @@ module Effect.Reactive
   , mapAccum_
   , newBehaviour
   , newEvent
-  , runSetup
+  , onSetup
   , partitionApply
   , partitionMapApply
   , patcher
@@ -72,6 +72,7 @@ module Effect.Reactive
   , pushAlways
   , pushFlipped
   , pushed
+  , runSetup
   , sample
   , sampleApply
   , sampleApplyMaybe
@@ -252,6 +253,15 @@ launchRaff (Raff m) = do
 runSetup :: forall t m. MonadRaff t m => Effect (Effect Unit) -> m Unit
 runSetup = liftRaff <<< Raff <<< Build._onReady <<<
   (Build._onCleanup <=< liftEffect)
+
+-- | Return an event that fires once when the network is setup.
+onSetup :: forall t m. MonadRaff t m => m (Event t Unit)
+onSetup = do
+  { fire, event } <- newEvent
+  runSetup do
+    fire unit
+    pure $ pure unit
+  pure event
 
 -------------------------------------------------------------------------------
 -- RaffPush monad
